@@ -1,3 +1,23 @@
 [theme]
-primaryColor = "#A33328"
 base = "light"
+primaryColor = "#1565C0"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#EEF5FD"
+textColor = "#0F1E33"
+linkColor = "#1565C0"
+borderColor = "#D6E4F5"
+showWidgetBorder = true
+baseFontSize = 17
+baseRadius = "0.7rem"
+buttonRadius = "0.6rem"
+headingFontWeights = [800, 700, 700, 600, 600, 600]
+codeFontSize = "0.9rem"
+dataframeHeaderBackgroundColor = "#EAF2FC"
+
+[theme.sidebar]
+backgroundColor = "#F3F8FE"
+secondaryBackgroundColor = "#E6F0FC"
+borderColor = "#D6E4F5"
+
+[client]
+toolbarMode = "minimal"

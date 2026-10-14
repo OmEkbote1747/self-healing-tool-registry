@@ -1,4 +1,4 @@
-# Self-Healing Tool Registry (PS-01 prototype)
+# SchemaHeal: Self-Healing Tool Registry (PS-01 prototype)
 
 When an API changes its request schema, a normal agent gets a `422` and retries the same request until it gives up.
 This prototype sits between the agent and its tools. It works out what changed, checks that the fix is safe,
@@ -39,7 +39,9 @@ are unsure about stops safely instead of being guessed.
 | `selfheal/llm.py` | Tier 2: an LLM picks which existing argument fits a new field (never supplies values) |
 | `selfheal/cases.py` | 125 synthetic cases (5 categories x 25) + 10 harder stress cases |
 | `selfheal/bench.py` | Runs both agents on the same cases and scores them |
-| `app.py` | Streamlit dashboard: live demo, benchmark, stress tests, registry + audit log |
+| `app.py` | Streamlit entry point: sidebar navigation, theme, LLM status |
+| `views/` | Pages: landing (Home), How it works, Live demo, Benchmark, Stress tests, Registry & audit log |
+| `.streamlit/config.toml` | White + light-blue theme, larger base font |
 
 ## Results (offline, rules + validator only)
 
