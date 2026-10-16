@@ -142,10 +142,11 @@ class State:
                                             GuardedHTTP((), timeout_s=settings.request_timeout_s, min_interval_s=0),
                                             settings.max_schema_bytes), sleep=sleep)
         self.test_service = None
+        self.test_engine.upstreams.resolve = lambda: self.test_service_started().url
         self.test_lock = threading.RLock()        # re-entrant: a demo job holds it while the orders flow re-enters
         from .demo import Jobs
         self.demo_jobs = Jobs()
-        self._svc_lock = threading.Lock()
+        self._svc_lock = threading.RLock()
         self.monitor = Monitor(self.engine, settings)
         self.started = time.time()
         self.lock = threading.Lock()
@@ -161,12 +162,21 @@ class State:
         from .testservice import TestService
         with self._svc_lock:
             if self.test_service is None or not self.test_service.running():
-                self.test_service = TestService().start()
-                register_secret(self.test_service.admin_token)
+                svc = TestService().start()
+                register_secret(svc.admin_token)
+                apps = json.loads(self.test_storage.get_meta("svc_apps") or "{}")
+                svc.restore(apps)                         # demo APIs served before a restart come back
+                svc.on_install = self._remember_app
                 self.test_engine.upstreams.guard = GuardedHTTP(
                     (), timeout_s=self.settings.request_timeout_s, min_interval_s=0,
-                    exempt=frozenset({self.test_service.address}))
+                    exempt=frozenset({svc.address}))
+                self.test_service = svc
         return self.test_service
+
+    def _remember_app(self, name: str, scenario: str, phase: str, has_keys: bool):
+        apps = json.loads(self.test_storage.get_meta("svc_apps") or "{}")
+        apps[name] = {"scenario": scenario, "phase": phase, "has_keys": has_keys}
+        self.test_storage.set_meta("svc_apps", json.dumps(apps))
 
     def sim_llm(self, choice: str):
         """LLM for a simulation run. 'gemini' is the real provider (labelled real); 'mock' is labelled mock."""
@@ -288,12 +298,31 @@ def create_app(state: State | None = None) -> FastAPI:
                 "response": {k: f.label() for k, f in op.response_fields.items()}, "signature": op.signature(),
                 "source": op.source,
                 "descriptions": {k: f.description for k, f in {**op.fields, **op.response_fields}.items() if f.description}}
-            if d.op is None:
-                return {"available": False, "status": d.status, "error_category": d.error_category,
-                        "detail": d.detail, "registered": side(old), "current_version": td.version}
+            if d.op is None or isinstance(d.op, str):
+                cat = d.error_category or ("method_changed" if isinstance(d.op, str) else "unknown")
+                return {"available": False, "status": d.status, "error_category": cat,
+                        "state": "unsupported" if d.status == "unsupported" else
+                        ("invalid" if cat in ("not_json", "invalid_schema", "operation_not_in_schema") else "unavailable"),
+                        "detail": scrub(d.detail or ""), "schema_url": d.url or None, "registered": side(old),
+                        "current_version": td.version, "repair_enabled": False}
             rep = do_diff(old, d.op)
-            return {"available": True, "registered": side(old), "live": side(d.op), "report": rep.model_dump(),
-                    "current_version": td.version}
+            return {"available": True, "state": "differs" if rep.changed else "no_drift", "registered": side(old),
+                    "live": side(d.op), "report": rep.model_dump(), "current_version": td.version,
+                    "schema_url": d.url, "repair_enabled": True}
+
+        @app.get(prefix + "/tools/{name}/schema", dependencies=[Depends(admin)])
+        def registered_schema(name: str):
+            """The schema the tool's ACTIVE version was built against (stored snapshot; no network request)."""
+            storage.tool(name) or not_found(name)
+            td = storage.current(name)
+            op = storage.get_schema(td.schema_signature)
+            fields = [] if op is None else [
+                {"field": k, "type": f.label(), "required": f.required, "description": f.description}
+                for k, f in {**op.fields, **op.response_fields}.items()] + [
+                {"field": f"header:{h}", "type": "header", "required": True, "description": ""} for h in op.headers]
+            return {"tool": name, "version": td.version, "signature": td.schema_signature,
+                    "source": op.source if op else None, "fields": fields,
+                    "note": "registered snapshot - not the live authoritative schema"}
 
         @app.post(prefix + "/tools/{name}/rollback", dependencies=[Depends(admin)])
         def rollback(name: str):
@@ -353,7 +382,7 @@ def create_app(state: State | None = None) -> FastAPI:
             return evidence_mod.scorecard(storage.evidence(5000, run_id)) | {
                 "environment": storage.environment, "pipeline": evidence_mod.incident_scorecard(incs)}
 
-        for fn in (tools, tool, versions, drift, rollback, delete, incidents, incident, audit, get_metrics,
+        for fn in (tools, tool, versions, drift, registered_schema, rollback, delete, incidents, incident, audit, get_metrics,
                    evidence_list, evidence_json, evidence_csv, evidence_one, scorecard):
             fn.__name__ = f"{storage.mode}_{fn.__name__}"
 

@@ -190,6 +190,7 @@ def reset(state) -> dict:
     """Return the controlled demo to a known-good state: REAL_API_TEST records cleared, service back to v1."""
     with state.test_lock:
         state.test_storage.reset()
+        state.test_storage.set_meta("svc_apps", "{}")
         if state.test_service and state.test_service.running():
             state.test_service.set_orders("v1", "normal")
             state.test_service.clear_apps()

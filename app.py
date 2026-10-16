@@ -5,7 +5,7 @@ Three separate environments, each with its own database: REAL API (/api, real pr
 offer one shared environment selector."""
 import streamlit as st
 
-from views import chaos, demo, drift, evidence, health, monitoring, overview, recovery
+from views import chaos, demo, drift, evidence, health, monitoring, overview, recovery, tools
 from views.common import ROOT, api, api_mode, inject_css, safe_call
 
 REPO_URL = "https://github.com/Paras131206/self-healing-tool-registry"
@@ -20,13 +20,14 @@ def recovery_center():
     recovery.render()
 
 
-RENDER = {"overview": overview.render, "monitoring": monitoring.render, "drift": drift.render,
+RENDER = {"overview": overview.render, "monitoring": monitoring.render, "tools": tools.render, "drift": drift.render,
           "recovery": recovery_center, "evidence": evidence.render, "demo": demo.render, "chaos": chaos.render,
           "health": health.render}
 P = st.Page
 pages = {
     "overview": P(overview.render, title="Overview", icon=":material/dashboard:", default=True),
     "monitoring": P(monitoring.render, title="API Registry", icon=":material/hub:", url_path="api-registry"),
+    "tools": P(tools.render, title="Tool Registry", icon=":material/inventory_2:", url_path="tool-registry"),
     "drift": P(drift.render, title="Schema Drift Explorer", icon=":material/difference:", url_path="drift"),
     "recovery": P(recovery_center, title="Recovery Center", icon=":material/healing:", url_path="recovery"),
     "evidence": P(evidence.render, title="Evidence & Scorecard", icon=":material/gavel:", url_path="evidence"),
@@ -36,7 +37,7 @@ pages = {
 }
 st.session_state["_pages"] = pages
 nav = st.navigation({
-    "Monitor and repair": [pages[k] for k in ("overview", "monitoring", "drift", "recovery", "evidence")],
+    "Monitor and repair": [pages[k] for k in ("overview", "monitoring", "tools", "drift", "recovery", "evidence")],
     "Demonstrate (not production)": [pages["demo"], pages["chaos"]],
     "System": [pages["health"]]})
 

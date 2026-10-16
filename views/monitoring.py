@@ -118,9 +118,9 @@ def _tool_card(t: dict):
                 st.success(f"Autonomous repair: {c['repair']['reason']}", icon=":material/healing:")
             if c.get("incident") and st.button("Open incident timeline", key=f"inc-{t['tool']}-{c['ts']}"):
                 go("recovery", incident_id=c["incident"], env_choice="REAL API")
-        with st.expander("Versions, rollback and delete"):
-            from views.tools import versions_panel
-            versions_panel("/api", t["tool"], t["current_version"])
+        if st.button("Open in Tool Registry", key=f"tr-{t['tool']}", icon=":material/inventory_2:",
+                     help="Configuration, registered schema, versions and rollback"):
+            go("tools", tool=t["tool"], env_choice="REAL API")
         with st.expander("Check schedule and history"):
             s1, s2, s3 = st.columns([1, 1, 1])
             enabled = s1.toggle("Scheduled checks", t["monitor_enabled"], key=f"en-{t['tool']}")

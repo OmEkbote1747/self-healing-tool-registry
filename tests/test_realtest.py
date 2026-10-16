@@ -78,16 +78,25 @@ def test_service_is_a_real_http_server_with_versioned_schema(state):
 
 
 def test_guard_exempts_only_the_exact_test_service_address(state):
+    from adaptix.netguard import check_url
     svc = state.test_service_started()
     up = state.test_engine.upstreams
     assert up.request(svc.url + "/orders-api", "GET", "/health").status_code == 200
-    with pytest.raises(EgressDenied):                                # another loopback port is still refused
-        up.request(f"http://127.0.0.1:{svc.port + 1}", "GET", "/")
-    with pytest.raises(EgressDenied):
-        up.request("http://169.254.169.254", "GET", "/latest")
+    with pytest.raises(EgressDenied):                                # the guard refuses any other loopback port
+        check_url(f"http://127.0.0.1:{svc.port + 1}/", (), exempt=up.guard.exempt)
+    # a loopback URL recorded by another process is re-pointed to THIS process's controlled service only
+    assert up.rebase(f"http://127.0.0.1:{svc.port + 1}/m/x/openapi.json") == svc.url + "/m/x/openapi.json"
+    assert up.rebase("http://localhost:1/x") == svc.url + "/x"
+    for url in ("http://169.254.169.254/latest", "http://10.0.0.5/x", "https://127.0.0.1:443/x"):
+        assert up.rebase(url) == url                                 # never rewritten
+        with pytest.raises(EgressDenied):
+            up.request(url, "GET", "/")
     with pytest.raises(EgressDenied):
         up.request("sim://x", "GET", "/")
-
+    prod = state.engine.upstreams                                    # production never rewrites loopback
+    assert prod.rebase(f"http://127.0.0.1:{svc.port}/x") == f"http://127.0.0.1:{svc.port}/x"
+    with pytest.raises(EgressDenied):
+        prod.request(svc.url, "GET", "/orders-api/health")
 
 def test_demo_blocks_without_real_gemini_and_never_falls_back(tmp_path):
     st = State(Settings(admin_token=TOKEN), storage=Storage(tmp_path / "p.db"), llm=NoProvider(),
