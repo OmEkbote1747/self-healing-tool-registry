@@ -135,3 +135,17 @@ def summarize(rows: list[dict]) -> dict:
         "tokens": sum(r["tokens"] for r in rows),
         "recovered": len(recovered), "should_recover": len(should_recover), "should_stop": len(should_stop),
     }
+
+
+if __name__ == "__main__":                       # python -m adaptix.evaluation --suite planned
+    import argparse
+    import json
+
+    from .api import State
+    from .config import get_settings
+    ap = argparse.ArgumentParser(description="Baseline vs ADAPTIX on simulated upstreams")
+    ap.add_argument("--suite", choices=list(SUITES), default="scenarios")
+    ap.add_argument("--seed", type=int, default=7)
+    a = ap.parse_args()
+    res = run(State(get_settings()).engine, a.suite, a.seed)
+    print(json.dumps({k: v for k, v in res.items() if k != "rows"}, indent=2))

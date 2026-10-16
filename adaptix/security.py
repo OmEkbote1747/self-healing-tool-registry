@@ -73,25 +73,6 @@ def redact_reply(payload):
     return redact(payload)
 
 
-def get_secret(name: str, default: str | None = None) -> str | None:
-    """Environment first (SCHEMAHEAL_SECRET_<NAME>), then Streamlit secrets, else default."""
-    env = "SCHEMAHEAL_SECRET_" + re.sub(r"[^A-Z0-9]", "_", name.upper())
-    if os.environ.get(env):
-        return os.environ[env]
-    try:
-        import streamlit as st
-        if name in st.secrets:
-            return str(st.secrets[name])
-    except Exception:
-        pass
-    return default
-
-
-def demo_secret() -> str:
-    """A throwaway per-process value for the demo, so no real-looking credential lives in the code."""
-    return "demo-" + _secrets.token_urlsafe(12)
-
-
 def purge_audit_log(path: str | Path, retention_days: int = 30) -> int:
     """Drop audit entries older than the retention window. Returns how many were removed."""
     path = Path(path)

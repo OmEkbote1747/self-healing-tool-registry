@@ -1,5 +1,5 @@
 {
- "description": "Adversarial schema-drift fixtures. Written by the SchemaHeal team, kept separate from the 125 planned cases. Contributions of independently sourced, real API changes in the same format are welcome.",
+ "description": "Adversarial schema-drift fixtures. Written by Team Runtime Terrors (ADAPTIX), kept separate from the 125 planned cases. Contributions of independently sourced, real API changes in the same format are welcome.",
  "cases": [
   {
    "id": "A01",

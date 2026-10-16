@@ -10,13 +10,6 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# approved configuration the healer may read header values from
-from .security import demo_secret, get_secret
-
-# approved configuration the healer may read header values from. Secrets come from the environment
-# (SCHEMAHEAL_SECRET_X_API_KEY) or the hosting platform's secret store; the demo falls back to a random
-# per-process value so no credential is stored in the code.
-APPROVED_CONFIG = {"x-api-key": get_secret("x-api-key") or demo_secret(), "x-client-version": "2.0"}
 
 
 @dataclass
