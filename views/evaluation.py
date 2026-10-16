@@ -29,7 +29,7 @@ def evaluation():
               "adversarial": "Adversarial fixtures (30)"}
     suite = c1.selectbox("Suite", list(suites), format_func=suites.get)
     seed = c2.number_input("Seed", 0, 10_000, 7)
-    llm_opts = {"none": "Rules only", "mock": "Mock LLM (not real)", "gemini": "Real Gemini"}
+    llm_opts = {"none": "Rules only", "mock": "Mock LLM (not real)", "gemini": "Real Gemini (only where rules cannot resolve)"}
     llm = c4.selectbox("LLM planner", list(llm_opts), format_func=llm_opts.get, key="eval_llm")
     c3.write("")
     if c3.button("Run evaluation", type="primary", icon=":material/play_arrow:"):

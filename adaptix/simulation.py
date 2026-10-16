@@ -302,4 +302,15 @@ def _summarize(s: Scenario, mode: str, res: dict, stats: dict | None, expected: 
             "outcome": outcome, "matches_expectation": outcome == expected, "category": res.get("category"),
             "incident": res.get("incident"), "reason": res.get("reason"), "duration_ms": res.get("duration_ms"),
             "tool_version": res.get("tool_version"), "upstream_calls": stats.get("calls"),
-            "side_effects": stats.get("effects")}
+            "side_effects": stats.get("effects"), "repair_by": repair_by(inc)}
+
+
+def repair_by(inc) -> str | None:
+    """Who proposed the patch that was applied, from the stored incident (None when nothing was applied)."""
+    if inc is None or not inc.plan or not inc.to_version or inc.rolled_back:
+        return None
+    src = inc.plan.get("source")
+    if src == "llm":
+        lab = llm_label(inc.llm)
+        return f"{lab['label']} ({lab['model']})" if lab["used"] else "LLM (no successful request)"
+    return "previously validated repair (reused)" if src == "reuse" else "rules planner"

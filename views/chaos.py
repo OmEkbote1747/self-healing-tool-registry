@@ -4,7 +4,11 @@ import streamlit as st
 from views.common import SIM_BADGE, api, badge, fmt_ms, go, header, mutated, safe_call
 
 LLM_CHOICES = {"none": "Rules only (deterministic, no LLM)", "mock": "Mock LLM (deterministic, NOT a real model)",
-               "gemini": "Real Gemini (real requests, labelled)"}
+               "gemini": "Real Gemini (Gemini proposes the repair)"}
+LLM_HELP = ("Rules only: deterministic rules plan the repair. Mock: a fake model, only for what rules cannot resolve. "
+            "Real Gemini: one real request to the configured Gemini model per run; Gemini proposes the repair, "
+            "rules only cross-check it, and independent validation decides whether it is applied. "
+            "Real Gemini appears only when GEMINI_API_KEY is configured on the server.")
 
 
 def _fields(d: dict) -> list[dict]:
@@ -94,7 +98,8 @@ def _result(r: dict, scenario: dict):
                    + (f" · tool v{r['tool_version']}" if r.get("tool_version") else "")
                    + f" · simulated upstream calls {r.get('upstream_calls')}"
                    + (f" · side effects {r['side_effects']}" if r.get("side_effects") is not None else "")
-                   + f" · LLM: {r['llm']['label']}")
+                   + f" · LLM: {r['llm']['label']}"
+                   + (f" · patch proposed by **{r['repair_by']}**" if r.get("repair_by") else " · no patch applied"))
         st.write(r.get("reason") or "")
         _detail(r, scenario)
 
@@ -112,7 +117,10 @@ def render():
 
 
 def _lab():
-    st.markdown(f"{SIM_BADGE} &nbsp; Everything on this page is simulated.", unsafe_allow_html=True)
+    st.markdown(f"{SIM_BADGE} &nbsp; The APIs and schema changes on this page are simulated (in-process). "
+                "If you choose Real Gemini, the requests to Gemini are real; its patch is applied to the simulated "
+                "tool and verified by a real retry against the simulated API, never against a real provider.",
+                unsafe_allow_html=True)
     cat = safe_call(api, "GET", "/api/simulations")
     integ = safe_call(api, "GET", "/api/integrations")
     if cat is None or integ is None:
@@ -125,7 +133,7 @@ def _lab():
     s = c2.selectbox("Scenario", items, format_func=lambda s: s["title"])
     choices = [k for k in LLM_CHOICES if k != "gemini" or gemini_ok]
     llm = c4.selectbox("LLM planner", choices, format_func=LLM_CHOICES.get,
-                       help="Real Gemini appears only when GEMINI_API_KEY is configured on the server")
+                       help=LLM_HELP)
     seed = st.number_input("Seed (same seed = same run)", 0, 10_000, 7)
     st.markdown(s["description"])
     exp = s["expected_now"] if llm != "gemini" else s["expected_with_real_llm"]
@@ -150,7 +158,8 @@ def _lab():
         if res:
             mutated()
             st.session_state["chaos_last"] = (s["id"], res["runs"])
-    if b2.button("Run all scenarios", icon=":material/playlist_play:", disabled=not confirm):
+    if b2.button("Run all scenarios", icon=":material/playlist_play:", disabled=not confirm,
+                 help="With Real Gemini this makes one Gemini request per scenario that needs a repair"):
         out, bar = [], st.progress(0.0)
         for i, sc in enumerate(cat):
             r = safe_call(api, "POST", "/api/simulations",

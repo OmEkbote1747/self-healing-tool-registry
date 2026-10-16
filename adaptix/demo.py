@@ -138,6 +138,7 @@ def _run_scenario(state, job: dict):
     svc = state.test_service_started()
     target = sim.ServiceTarget(svc)
     eng.set_llm(state.llm if job["llm"] == "gemini" else NoProvider())
+    eng.llm_required = job["llm"] == "gemini"         # Gemini chosen: Gemini proposes the repair, rules cross-check
     name = f"demo-{job['scenario']}-{uuid.uuid4().hex[:6]}"
     _event(job, "Setup", "info", f"Preparing a known-good tool against schema v1 on the controlled service ({svc.url})")
     target.install(name, s, "v1")
@@ -162,7 +163,7 @@ def _run_scenario(state, job: dict):
     job["result"] = {"status": outcome, "reason": res.get("reason"), "incident": res.get("incident"), "tool": name,
                      "tool_version": res.get("tool_version"), "evidence_id": ev["evidence_id"], "expected": expected,
                      "as_expected": outcome == expected, "recovery_ms": res.get("duration_ms"),
-                     "llm": sim.llm_label(inc.llm if inc else None)}
+                     "llm": sim.llm_label(inc.llm if inc else None), "repair_by": sim.repair_by(inc)}
 
 
 def _run_orders(state, job: dict):

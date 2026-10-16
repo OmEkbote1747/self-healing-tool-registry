@@ -575,10 +575,13 @@ def create_app(state: State | None = None) -> FastAPI:
         modes = {"adaptix": [True], "baseline": [False], "both": [False, True]}[body.mode]
         with st.lock:                                   # the simulation engine's LLM is chosen per run
             st.sim_engine.set_llm(st.sim_llm(body.llm))
+            # Choosing real Gemini means Gemini proposes the repair (rules only cross-check), not "rules first"
+            st.sim_engine.llm_required = body.llm == "gemini"
             try:
                 runs = [simulation.run(st.sim_engine, body.scenario, body.seed, heal) for heal in modes]
             finally:
                 st.sim_engine.set_llm(NoProvider())
+                st.sim_engine.llm_required = False
         return {"simulated": True, "llm_choice": body.llm, "runs": runs}
 
     @app.post("/api/simulations/reset", dependencies=[Depends(admin)])

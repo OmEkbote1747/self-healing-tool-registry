@@ -29,7 +29,9 @@ def _result(job: dict):
                     f"started {ist(job['started_at'])} · total {fmt_ms(job['elapsed_ms'])}"
                     + (f" · expected **{r['expected']}** ({'as expected' if r.get('as_expected') else 'NOT as expected'})"
                        if r.get("expected") else "")
-                    + (f" · LLM: {r['llm']['label']}" if r.get("llm") else ""), unsafe_allow_html=True)
+                    + (f" · LLM: {r['llm']['label']}" if r.get("llm") else "")
+                    + (f" · patch proposed by **{r['repair_by']}**" if r.get("repair_by") else ""),
+                    unsafe_allow_html=True)
         if r.get("reason"):
             st.write(r["reason"])
         if job.get("error"):
@@ -58,7 +60,9 @@ def render():
     llm_choices = ["gemini"] if s["needs_gemini"] else (["none", "gemini"] if cat["gemini_configured"] else ["none"])
     llm = c2.selectbox("2. Repair engine", llm_choices,
                        format_func={"none": "Rules only (deterministic)", "gemini": "Gemini Flash-Lite (real)"}.get,
-                       help="Gemini is offered only when GEMINI_API_KEY is configured. ADAPTIX never switches engines.")
+                       help="Gemini is offered only when GEMINI_API_KEY is configured. With Gemini, one real request "
+                            "is made and Gemini proposes the repair; rules only cross-check it and independent "
+                            "validation decides whether it is applied. ADAPTIX never switches engines.")
     st.caption(f"Change: **{s['change']}** · expected outcome: **{s['expected']}**")
     if not s["available"]:
         st.warning("This scenario needs a real Gemini key on the server (GEMINI_API_KEY). Nothing will run without it.",
