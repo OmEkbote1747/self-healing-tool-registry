@@ -164,7 +164,9 @@ class GeminiProvider:
         return r
 
     def plan(self, context: dict) -> LLMResult:
-        return self._request(build_prompt(context), json_output=True, max_tokens=2048)
+        prompt = ("Return only the repair-plan JSON. Map unresolved fields only; quote schema evidence verbatim. "
+                  "Never invent values, credentials, URLs or code.\n\n" + build_prompt(context))
+        return self._request(prompt, json_output=True, max_tokens=256)
 
     def check(self) -> LLMResult:
         """A minimal real request. 'verified' is reported only after one of these (or a plan call) succeeds."""

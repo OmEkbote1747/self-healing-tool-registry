@@ -38,8 +38,8 @@ class Settings:
     # LLM
     llm_provider: str = "gemini"                 # gemini | mock | none
     gemini_model: str = "gemini-3.5-flash-lite"  # Google's recommended fast/cost-efficient model (docs, 2026-10)
-    llm_timeout_s: float = 20.0
-    llm_max_retries: int = 2
+    llm_timeout_s: float = 4.0
+    llm_max_retries: int = 0
     llm_min_confidence: float = 0.8
     # repair engine
     max_repair_attempts: int = 2
@@ -84,8 +84,8 @@ def get_settings() -> Settings:
         test_db_path=env("ADAPTIX_TEST_DB_PATH", "data/adaptix-test.db"),
         llm_provider=(env("LLM_PROVIDER", "gemini") or "gemini").lower(),
         gemini_model=env("GEMINI_MODEL", "gemini-3.5-flash-lite"),
-        llm_timeout_s=_float("LLM_TIMEOUT_SECONDS", 20.0),
-        llm_max_retries=_int("LLM_MAX_RETRIES", 2),
+        llm_timeout_s=_float("LLM_TIMEOUT_SECONDS", 4.0),
+        llm_max_retries=_int("LLM_MAX_RETRIES", 0),
         llm_min_confidence=_float("LLM_MIN_CONFIDENCE", 0.8),
         max_repair_attempts=_int("ADAPTIX_MAX_REPAIR_ATTEMPTS", 2),
         max_transport_retries=_int("ADAPTIX_MAX_RETRIES", 2),
