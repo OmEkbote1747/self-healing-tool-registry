@@ -16,6 +16,7 @@ import uuid
 from . import simulation as sim
 from .cases import build_cases, load_fixtures
 from .metrics import pct
+from .llm import is_live
 from .mock_api import make_app
 from .models import ToolSpec
 
@@ -98,7 +99,7 @@ def run(engine, suite: str = "scenarios", seed: int = 7, progress=None) -> dict:
                     progress(len(rows) / total)
     summary = {mode: summarize([r for r in rows if r["mode"] == mode]) for mode in ("baseline", "adaptix")}
     out = {"suite": suite, "label": SUITES[suite], "seed": seed, "simulated": True, "cases": len(rows) // 2,
-           "llm": engine.llm.status().get("provider"), "llm_real": bool(getattr(engine.llm, "real", False)),
+           "llm": engine.llm.status().get("provider"), "llm_real": is_live(engine.llm),
            "duration_s": round(time.perf_counter() - t0, 2), "summary": summary, "rows": rows}
     engine.storage.event("evaluation_run", None, {k: v for k, v in out.items() if k != "rows"}, simulated=True)
     return out

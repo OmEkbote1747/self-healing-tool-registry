@@ -138,7 +138,7 @@ class GeminiProvider:
         self._sleep(min(4.0, 0.5 * 2 ** (attempt - 1)) + random.uniform(0, 0.25))
 
     def _result(self, ok, t0, attempts, cat, err, alias, pt=None, ot=None, plan=None) -> LLMResult:
-        r = LLMResult(provider=self.name, model=self.model, ok=ok, real=True, plan=plan, error_category=cat,
+        r = LLMResult(provider=self.name, model=self.model, ok=ok, real=attempts > 0, plan=plan, error_category=cat,
                       error=scrub(err) if err else None, duration_ms=round((time.perf_counter() - t0) * 1000, 1),
                       prompt_tokens=pt, output_tokens=ot, credential_alias=alias, attempts=attempts, ts=now_iso())
         with self._lock:

@@ -75,6 +75,11 @@ class NoProvider:
                 "note": "LLM tier disabled; ambiguous repairs stop safely"}
 
 
+def is_live(provider) -> bool:
+    """True only for a real provider that has a usable credential configured (it may still fail at request time)."""
+    return bool(getattr(provider, "real", False)) and bool(getattr(provider, "configured", lambda: True)())
+
+
 def make_provider(settings, creds):
     if settings.llm_provider == "gemini":
         from .gemini import GeminiProvider

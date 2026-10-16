@@ -146,3 +146,16 @@ def test_prompt_injection_in_schema_text_cannot_add_values(make_engine):
     eng = make_engine(llm=p)
     r = sim.run(eng, "window-rename-llm")
     assert r["outcome"] == "stopped"
+
+
+def test_unconfigured_gemini_is_not_live_and_sends_nothing(make_engine):
+    """No key: no request is sent, the result is not labelled real, and LLM-only scenarios are expected to stop."""
+    from adaptix.llm import is_live
+    calls = []
+    p = GeminiProvider(CredentialRegistry([Credential("gemini-primary", "gemini", "gemini", "UNSET_ENV_VAR", scope=["llm"])]),
+                       "gemini-3.5-flash-lite", client_factory=lambda k: FakeClient({}, k, calls))
+    r = p.check()
+    assert not r.ok and not r.real and r.attempts == 0 and calls == []
+    assert p.status()["connectivity"] == "not_configured" and not is_live(p)
+    eng = make_engine(llm=p)
+    assert sim.expected_outcome(sim.BY_ID["window-rename-llm"], eng, True) == "stopped"

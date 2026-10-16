@@ -9,6 +9,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 
+from .llm import is_live
 from .mock_api import make_app
 from .models import ToolSpec
 
@@ -184,7 +185,7 @@ def expected_outcome(s: Scenario, engine, heal: bool = True) -> str:
     """What a correct run should end with. Baseline (no self-healing) only succeeds when nothing changed."""
     if not heal:
         return "stopped"
-    if s.needs_llm and not getattr(engine.llm, "real", False):
+    if s.needs_llm and not is_live(engine.llm):
         return "stopped"                    # without a real model the safe outcome is to stop
     return s.expect
 
