@@ -1,77 +1,132 @@
-# SchemaHeal: Self-Healing Tool Registry (PS-01 prototype)
+# SchemaHeal: a guarded OpenAPI request adapter for AI agents (prototype)
 
-When an API changes its request schema, a normal agent gets a `422` and retries the same request until it gives up.
-This prototype sits between the agent and its tools. It works out what changed, checks that the fix is safe,
-patches the tool definition in memory and finishes the task, **without making up data**.
+PS-01 · Genesis 2.0, Track EVA 02 · Team Runtime Terrors
+
+When an API changes its request schema, an agent's tool calls start failing with `422`. SchemaHeal sits
+between the agent and its tools. It reads the error and the new `/openapi.json`, and then does one of three things:
+
+| Outcome | When |
+|---|---|
+| **Repairs automatically** | the change is tightly defined and reversible (see the boundary below) |
+| **Holds for a human** | the repair passes validation but could be wrong in meaning (medium-confidence match, a different entity name, a unit word, an LLM suggestion, or a tool whose policy says so) |
+| **Stops and reports** | a required value does not exist, a value is not allowed, the method or body format changed, auth changed, or the API failed in a way that is not a schema problem |
+
+It never invents a value: every value it sends comes from the agent's own arguments (after a lossless
+conversion) or from approved configuration.
+
+> This is a prototype. It is not general "self-healing": a schema-valid request can still be wrong in
+> meaning, so anything ambiguous goes to a person. Results below come from cases written by our team
+> against our own mock API.
+
+## Automatic repair boundary
+
+Applied without a human only when **all** hold:
+
+- a renamed or moved field matches an orphaned argument with similarity ≥ 75, and no other candidate is close;
+- the names do not refer to different things (`channel_id → thread_id` is held) and no unit word changed
+  (`amount → amount_cents`, `timeout_ms → timeout_seconds` are held);
+- type changes are lossless (`"3" → 3` yes, `"3.5" → int` stop, `"yes" → bool` stop);
+- enum values are still allowed and dates are ISO;
+- new headers come from approved configuration;
+- the tool's policy allows automatic repair (e.g. payments can be set to always need approval);
+- the repaired request validates against the new schema before it is sent.
+
+Automatic repairs then start as a **canary** used only by the agent that made them. They are shared after
+3 successful calls, and rolled back if they fail.
+
+## Architecture
 
 ```
-agent -> tool registry -> API
-              | 422
-              v
- error parser + /openapi.json -> Tier 1 rules -> (Tier 2 LLM if unsure) -> validator -> patch + log -> retry once
-                                                                              |
-                                                                       reject -> stop and report
+agent ──► SchemaHeal (Streamlit console or middleware API)
+            ├─ transport: timeouts, pooling, rate limit, circuit breaker, retry budget, idempotency key
+            ├─ schema reader: /openapi.json → body/query/path fields, required, enum, format, arrays, unions
+            ├─ Tier 1 rules → (Tier 2 LLM, names and types only) → policy gate → validator
+            ├─ durable registry (SQLite): tenant-scoped versions, proposals, policies, events
+            └─ redacted traces and audit log
+                    │
+                    ▼
+                 the API
 ```
-
-## Run it locally
-
-```bash
-python3.12 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/streamlit run app.py
-```
-
-Benchmark from the command line:
-
-```bash
-.venv/bin/python -m selfheal.bench
-```
-
-Optional Tier 2 (LLM proposals): set `ANTHROPIC_API_KEY` before starting. Without it, anything the rules
-are unsure about stops safely instead of being guessed.
-
-## What's inside
 
 | File | What it does |
 |---|---|
-| `selfheal/mock_api.py` | FastAPI + Pydantic mock API whose schema can be changed; returns real 422s and `/openapi.json` |
-| `selfheal/healer.py` | Tool registry (versioned), error parser, Tier 1 rules, validator, stop switch, JSONL audit log, baseline retry agent |
-| `selfheal/llm.py` | Tier 2: an LLM picks which existing argument fits a new field (never supplies values) |
-| `selfheal/cases.py` | 125 synthetic cases (5 categories x 25) + 10 harder stress cases |
-| `selfheal/bench.py` | Runs both agents on the same cases and scores them |
-| `app.py` | Streamlit entry point: sidebar navigation, theme, LLM status |
-| `views/` | Pages: landing (Home), How it works, Live demo, Benchmark, Stress tests, Registry & audit log |
-| `.streamlit/config.toml` | White + light-blue theme, larger base font |
+| `selfheal/healer.py` | orchestration: diagnose, map, convert, validate, gate, patch, retry once |
+| `selfheal/policy.py` | repair policy: confidence thresholds, entity and unit checks, per-tool overrides |
+| `selfheal/schema.py` | OpenAPI operation reader (methods, params, optional/enum/array/union/format fields) |
+| `selfheal/transport.py` | timeouts, pooling, rate limit, circuit breaker, retry budget, idempotency, replay rules |
+| `selfheal/store.py` | durable tenant-scoped registry: versions, proposals, policies, events (SQLite) |
+| `selfheal/security.py` | redaction, secrets from the environment, audit retention |
+| `selfheal/llm.py` | optional Tier 2: an LLM picks which existing argument fits (never values; always reviewed) |
+| `selfheal/service.py` | middleware API with tenant keys and roles, review queue, OpenAI tool-calling adapter |
+| `selfheal/client.py` | Python SDK for the service |
+| `selfheal/baselines.py` | retry-loop and greedy error-reading baselines |
+| `selfheal/mock_api.py` | mock API with schema drift, idempotency, fault injection |
+| `selfheal/cases.py`, `fixtures/` | 125 planned cases, 10 stress cases, 30 adversarial JSON fixtures |
+| `app.py`, `views/` | Streamlit console (landing page, demo, benchmark, review queue, API docs) |
 
-## Results (offline, rules + validator only)
+## Run it
 
-| Test scenario | Cases | Baseline success | Our success | Unsafe repairs |
-|---|---|---|---|---|
-| Field rename | 25 | 0% | 100% | 0 |
-| Type change | 25 | 0% | 100% | 0 |
-| Nested field change | 25 | 0% | 100% | 0 |
-| New required header | 25 | 0% | 100% | 0 |
-| Missing value (must stop) | 25 | 0% | 100% | 0 |
-| **Total** | **125** | **0%** | **100%** | **0** |
+```bash
+python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+.venv/bin/streamlit run app.py                     # console
+.venv/bin/python -m pytest -q                      # 76 tests
+.venv/bin/python -m selfheal.bench                 # all suites, three agents
+SCHEMAHEAL_API_KEYS="acme:agent:AGENT_KEY,acme:reviewer:REVIEW_KEY" \
+  .venv/bin/uvicorn selfheal.service:app --port 8000   # middleware API, docs at /docs
+```
 
-Median time from failure to recovery or safe stop: about 1 ms (in-process mock API). Tokens per rule-based fix: 0.
+Secrets: header values come from `SCHEMAHEAL_SECRET_<NAME>` environment variables (e.g.
+`SCHEMAHEAL_SECRET_X_API_KEY`) or Streamlit secrets, never from code. Optional LLM tier: set `ANTHROPIC_API_KEY`.
 
-Stress cases (outside the 125): 6/10 pass, 2 safe failures (synonyms with no shared words, e.g.
-`user_id -> customer_ref`, which stop and need the LLM tier), and **2 wrong repairs**:
-`channel_id -> thread_id` (similar name, different meaning) and `amount -> amount_cents` (hidden unit change).
+## Middleware API (first integration target: OpenAI-compatible function calling)
+
+```python
+from selfheal.client import SchemaHealClient
+sh = SchemaHealClient("http://localhost:8000", api_key=AGENT_KEY)
+sh.register_tool("update_user", base_url="https://api.example.com", path="/users/update",
+                 arg_schema={"user_id": "str", "email": "str"})
+resp = llm.chat.completions.create(model=MODEL, messages=messages, tools=sh.openai_tools())
+messages += sh.handle_tool_calls(resp.choices[0].message.tool_calls)
+```
+
+Endpoints: `POST /v1/tools`, `GET /v1/openai/tools`, `POST /v1/openai/tool_calls`, `POST /v1/tools/{name}/call`,
+`GET /v1/tools/{name}/versions`, `GET /v1/repairs`, `POST /v1/repairs/{id}/approve|reject`,
+`POST /v1/tools/{name}/rollback`, `PUT /v1/policies/{tool}`, `GET /v1/events`. Keys map to a tenant and a role
+(agent or reviewer); every query is tenant-scoped.
+
+## Results
+
+Same cases for three agents. "False repairs" are wrong requests that were actually sent.
+
+| Suite | Agent | Zero-touch fixed | Held for approval | Safe stops | False repairs | Invented values |
+|---|---|---|---|---|---|---|
+| 125 planned | Retry loop | 0 / 85 | 0 | 40 / 40 | 0 | 0 |
+| | Greedy error-reader | 60 / 85 | 0 | 0 / 40 | 40 | 30 |
+| | **SchemaHeal** | **79 / 85 (93%)** | 6 | **40 / 40** | **0** | **0** |
+| 10 stress | Greedy error-reader | 4 / 5 | 0 | 1 / 5 | 4 | 6 |
+| | **SchemaHeal** | 2 / 5 | 3 | **5 / 5** | **0** | **0** |
+| 30 adversarial | Greedy error-reader | 12 / 13 | 0 | 6 / 17 | 11 | 5 |
+| | **SchemaHeal** | 10 / 13 (77%) | 7 | **17 / 17** | **0** | **0** |
+
+Median time from a failed call to recovery or a safe stop is a few milliseconds against the in-process mock.
+The greedy baseline is a heuristic stand-in for an error-reading LLM agent, not a real model.
+
+## Production readiness
+
+| Gap | Status | What exists | Still open |
+|---|---|---|---|
+| Middleware / agent integration | **Partial** | FastAPI service, SDK, OpenAI-compatible adapter, tenant keys and roles | MCP server, agent-framework adapters, real upstream trial |
+| Unsafe automatic repair | **Addressed in prototype** | confidence thresholds, entity and unit checks, per-tool policies, review queue, canary rollout, auto-rollback | semantic compatibility rules per domain; approval UX for teams |
+| Schema coverage | **Partial** | methods, query/path params, optional, enums, arrays, unions, date format, content-type check | auth scheme changes, oneOf discriminators, non-JSON payloads, response-schema drift |
+| Durable registry | **Partial** | SQLite with tenants, atomic versioning, conflict checks, rollback history, events | Postgres for multi-host, migrations tooling, cache invalidation across hosts |
+| Security and privacy | **Partial** | redaction, masked error echoes, env/platform secrets, value-free LLM prompts, retention | encrypted secret store/KMS, SSO/RBAC, per-tenant secrets, incident response |
+| Request handling | **Addressed in prototype** | timeouts, pooling, rate limit, circuit breaker, retry budget, idempotency keys, no replay after timeouts/5xx | distributed rate limits and breakers, backoff policies per upstream |
+| Evaluation | **Partial** | stronger baseline, adversarial fixtures, separate false-repair and safe-stop rates | independently sourced real API changes, staged deployment with auto-repair off by default |
 
 ## Honest limits
 
-- The 125 cases were written by us alongside the healer and run against our own mock API, so 100% shows the
-  rules handle these patterns, not that they handle every real API.
-- The baseline is a simple retry loop. An LLM agent that reads the error message itself would do better than 0%.
-- Name similarity can be fooled by similar names with different meanings, and unit changes are invisible in a
-  schema. Medium-confidence matches should go to the LLM tier or a human for approval.
-- The Tier 2 LLM path is implemented but was not exercised in these results (no API key was set).
-
-## Deploy to Streamlit Community Cloud
-
-1. Push this folder to a GitHub repository (`.venv/` and `logs/` are git-ignored).
-2. Go to https://share.streamlit.io, sign in with GitHub, click **Create app**, pick the repo and set the
-   main file to `app.py`.
-3. Optional: add `ANTHROPIC_API_KEY` under **Advanced settings -> Secrets** to turn on Tier 2.
+- Every suite was written by our team and runs against our own mock API.
+- Name similarity cannot prove two fields mean the same thing; that is why medium-confidence and
+  different-entity matches go to a human.
+- The LLM tier is implemented but was not used in these results (no API key was set).
+- SQLite suits one host; multi-instance deployments need Postgres behind the same interface.

@@ -8,8 +8,9 @@ def render():
 <div class="sh-hero">
   <div class="sh-badge">PS-01 · Genesis 2.0 · Team Runtime Terrors</div>
   <h1>Keep AI agents running<br/>when the <b class="accent">APIs they use change.</b></h1>
-  <p>SchemaHeal sits between an agent and its tools. When an API changes its schema, it works out what changed,
-  checks the fix is safe, patches the tool and finishes the task, <b>without ever making up data</b>.</p>
+  <p>A guarded request adapter for AI agents. When an API changes its schema, SchemaHeal fixes the safe changes
+  automatically, holds ambiguous ones for a human, and stops when a fix would need a guess.
+  It <b>never makes up data</b>.</p>
 </div>""", unsafe_allow_html=True)
 
     c1, c2, _ = st.columns([1, 1, 0.7])
@@ -75,10 +76,15 @@ def render():
                                   "self-repair for any API + audit log"]},
         hide_index=True, use_container_width=True)
 
-    st.markdown('<div class="sh-note"><b>Honest limits.</b> The 125 cases were written by our team and run against our '
-                'own mock API. The baseline is a simple retry loop. In harder stress tests 6 of 10 pass, with 2 wrong '
-                'repairs (similar names with different meanings, hidden unit changes), which we plan to route to the '
-                'LLM or a human for approval.</div>', unsafe_allow_html=True)
+    section("Against a stronger baseline", "Same 125 cases. An agent that reads the errors and repairs greedily "
+            "recovers more often on its own, but sends wrong requests.")
+    from selfheal.bench import compare
+    from views.common import cached_benchmark
+    st.dataframe(compare(cached_benchmark()), hide_index=True, use_container_width=True)
+    st.markdown('<div class="sh-note"><b>Honest limits.</b> This is a prototype, not general self-healing. All test '
+                'suites were written by our team and run against our own mock API; results on real third-party APIs '
+                'are still to be measured. A schema-valid request can still be wrong in meaning, which is why '
+                'ambiguous repairs always go to a person.</div>', unsafe_allow_html=True)
     st.write("")
     if st.button("Open the live demo  →", type="primary"):
         st.switch_page(st.session_state["_pages"]["demo"])
