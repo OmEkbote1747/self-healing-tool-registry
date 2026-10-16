@@ -62,6 +62,17 @@ class GeminiProvider:
         self._lock = threading.Lock()
         self.last: dict = {}                    # safe metadata of the last real request
         self.last_success_at: str | None = None
+        # One long-lived SDK client per credential. A client created inline and dropped is garbage-collected
+        # mid-request, which closes its HTTP connection ("client has been closed").
+        self._clients: dict[tuple[str, int], object] = {}
+
+    def _client_for(self, alias: str, key: str):
+        with self._lock:
+            ck = (alias, hash(key))
+            if ck not in self._clients:
+                self._clients = {k: v for k, v in self._clients.items() if k[0] != alias}   # key was rotated
+                self._clients[ck] = self._client(key)
+            return self._clients[ck]
 
     def configured(self) -> bool:
         return any(c["configured"] and c["state"] != "missing" for c in self.creds.status() if c["group"] == "gemini")
@@ -94,7 +105,8 @@ class GeminiProvider:
             alias = cred.alias
             attempts += 1
             try:
-                resp = self._client(key).models.generate_content(
+                client = self._client_for(cred.alias, key)
+                resp = client.models.generate_content(
                     model=self.model, contents=contents, config=self._config(json_output, max_tokens))
             except Exception as exc:                              # categorised, never re-raised with the key
                 last_cat, last_err = classify_gemini_error(exc), scrub(str(exc))[:300]
@@ -152,7 +164,7 @@ class GeminiProvider:
 
     def check(self) -> LLMResult:
         """A minimal real request. 'verified' is reported only after one of these (or a plan call) succeeds."""
-        return self._request("Reply with the single word OK.", json_output=False, max_tokens=8)
+        return self._request("Reply with the single word OK.", json_output=False, max_tokens=64)
 
     def status(self) -> dict:
         configured = self.configured()

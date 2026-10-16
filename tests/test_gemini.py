@@ -159,3 +159,15 @@ def test_unconfigured_gemini_is_not_live_and_sends_nothing(make_engine):
     assert p.status()["connectivity"] == "not_configured" and not is_live(p)
     eng = make_engine(llm=p)
     assert sim.expected_outcome(sim.BY_ID["window-rename-llm"], eng, True) == "stopped"
+
+
+def test_sdk_client_is_kept_alive_and_reused_per_credential():
+    """Regression: an inline genai.Client was garbage-collected mid-request ("client has been closed")."""
+    made, calls, script = [], [], ["OK", "OK"]
+
+    def factory(k):
+        made.append(k)
+        return FakeClient(script, k, calls)
+    p = GeminiProvider(creds(False), "gemini-3.5-flash-lite", client_factory=factory, sleep=lambda s: None)
+    assert p.check().ok and p.check().ok
+    assert len(made) == 1 and len(calls) == 2

@@ -121,7 +121,9 @@ On Streamlit Cloud, put these under the app's **Secrets**. `config.env()` reads 
 - An invalid or revoked credential is marked as such and is never modified, retried with variations, or "repaired". An authentication error is never treated as schema drift.
 - It cannot create, refresh or rotate credentials; an operator must supply new ones. Credential state is held in process memory and resets on restart.
 
-## Results (simulated upstreams, measured on 2026-10-16, no LLM key configured)
+## Results (simulated upstreams, measured on 2026-10-16)
+
+Without an LLM key:
 
 "Baseline" makes the same call with repair disabled, so every drifted call fails.
 
@@ -131,11 +133,16 @@ On Streamlit Cloud, put these under the app's **Secrets**. `config.env()` reads 
 | Planned schema changes | 125 | 79 / 85 (92.9%) | 40 / 40 (100%) | 0 | 6.7 ms |
 | Adversarial fixtures | 30 | 10 / 13 (76.9%) | 17 / 17 (100%) | 0 | 6.7 ms |
 
+With a **real Gemini key** (`gemini-3.5-flash-lite`, run on 2026-10-16):
+
+- **Chaos Lab scenarios:** 9 / 9 recovered, including the LLM-only booking-window rename, and 10 / 10 stopped safely. 0 incorrect patches; 4 Gemini calls, all successful.
+- **Adversarial fixtures:** unchanged at 10 / 13 recovered and 17 / 17 safe stops, with 0 incorrect patches. Gemini proposed mappings for the 3 misses, but the independent validator rejected them: the schema contains no text that grounds the rename, so ADAPTIX stops rather than trusting the model.
+
 The repairable cases ADAPTIX did not recover are **safe misses**: it stopped instead of guessing, and no wrong data was sent. Examples: `uid`, `user_identifier`, `room_ref` and `phone → mobile` with no documentation linking the names, and the scenario that needs an LLM. Recovery times are against in-process simulations. They exclude network latency and LLM latency.
 
 ## Tests
 
-`python -m pytest -q` → 126 passed, 2 skipped. The two skipped tests are the live Gemini tests, which need `GEMINI_API_KEY`. The suite covers:
+`python -m pytest -q` → 127 passed. The 2 live Gemini tests in `tests/test_gemini_live.py` are skipped without `GEMINI_API_KEY`; with a real key they passed on 2026-10-16. The suite covers:
 
 - every Chaos Lab scenario, plus baseline mode;
 - classification, including that auth errors are never repaired;
@@ -150,7 +157,7 @@ The repairable cases ADAPTIX did not recover are **safe misses**: it stopped ins
 ## Limitations
 
 - The evaluation uses simulated APIs and team-written cases. Independently sourced, real API changes are still needed.
-- **No real Gemini request has been run in this repository's evaluation** (no key was available). The Gemini adapter is tested against a fake client and the SDK's real error types only.
+- Real Gemini calls were verified on 2026-10-16. Google can return `503 high demand` for a model; ADAPTIX retries a bounded number of times and otherwise stops safely.
 - Name similarity and documentation cannot prove two fields mean the same thing. When the evidence is not explicit, ADAPTIX stops.
 - SQLite suits one host. Multiple instances need a shared database and a distributed lock. Credential state is in memory.
 - On Streamlit Cloud the SQLite file is ephemeral, so records reset when the app restarts.
