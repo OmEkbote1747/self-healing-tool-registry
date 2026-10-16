@@ -7,6 +7,7 @@ and a real /openapi.json from it, exactly like a production FastAPI service.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -33,10 +34,14 @@ def _build_model(name: str, fields: dict[str, str]) -> type[BaseModel]:
 
 
 def make_app(path: str, fields: dict[str, str], headers: list[str] | None = None,
-             title: str = "Mock API") -> FastAPI:
+             title: str = "Mock API", faults: dict | None = None) -> FastAPI:
+    """faults: {"status": 503} to fail every call, {"delay": 1.0} to answer slowly *after* doing the work."""
     headers = [h.lower() for h in (headers or [])]
     model = _build_model("Body_" + path.strip("/").replace("/", "_"), fields)
     app = FastAPI(title=title)
+    app.state.effects = 0                 # how many times the side effect really happened
+    app.state.idempotency = {}            # Idempotency-Key -> cached response
+    faults = faults or {}
 
     header_params = [{"name": h, "in": "header", "required": True, "schema": {"type": "string"}}
                      for h in headers]
@@ -47,6 +52,11 @@ def make_app(path: str, fields: dict[str, str], headers: list[str] | None = None
                         "content": {"application/json": {"schema": {"$ref": f"#/components/schemas/{model.__name__}"}}}},
     })
     async def endpoint(request: Request):
+        if faults.get("status"):
+            return JSONResponse(status_code=faults["status"], content={"detail": "injected failure"})
+        key = request.headers.get("idempotency-key")
+        if key and key in app.state.idempotency:          # replay of a request we already processed
+            return app.state.idempotency[key]
         errors = []
         for h in headers:
             if not request.headers.get(h):
@@ -64,7 +74,13 @@ def make_app(path: str, fields: dict[str, str], headers: list[str] | None = None
             parsed = None
         if errors:
             return JSONResponse(status_code=422, content={"detail": errors})
-        return {"status": "updated", "received": parsed.model_dump()}
+        app.state.effects += 1
+        result = {"status": "updated", "received": parsed.model_dump()}
+        if key:
+            app.state.idempotency[key] = result
+        if faults.get("delay"):
+            await asyncio.sleep(faults["delay"])        # the work is done, but the answer is late
+        return result
 
     # make sure the model shows up in /openapi.json components
     original = app.openapi

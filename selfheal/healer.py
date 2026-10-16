@@ -28,6 +28,7 @@ from rapidfuzz import fuzz
 from . import llm
 from .policy import PolicySet
 from .security import redact, redact_headers, redact_reply
+from .transport import NOT_SCHEMA, REPAIRABLE, Transport, TransportError
 
 MAX_PATCH_ATTEMPTS = 2
 ELIMINATION_MIN = 50   # below this, a lone candidate is not trusted
@@ -286,15 +287,34 @@ class SelfHealer:
         self.log_path = Path(log_path) if log_path else None
         self.use_llm = llm.available() if use_llm is None else use_llm
         self.policies = policies or PolicySet()
+        self._transports: dict[int, Transport] = {}
+
+    def transport(self, client) -> Transport:
+        if isinstance(client, Transport):
+            return client
+        return self._transports.setdefault(id(client), Transport(client=client))
 
     # -- public
     def call(self, client, tool: str, args: dict, case_id: str = "", agent_id: str = "agent-A") -> Outcome:
         out = Outcome(False, None, None)
+        client = self.transport(client)
+        key = Transport.new_idempotency_key()           # one key per logical call, reused on its retry
         td = self.registry.current(tool, agent_id)
-        status, resp = self._send(client, td, args, out, label=f"call with tool v{td.version} ({td.status})")
+        try:
+            status, resp = self._send(client, td, args, out, label=f"call with tool v{td.version} ({td.status})",
+                                      key=key)
+        except TransportError as e:
+            return self._transport_stop(out, e)
         if status < 400:
             self.registry.record_success(td)
             out.success, out.status, out.response = True, status, resp
+            return out
+        if status not in REPAIRABLE:          # not a schema problem: never repaired or replayed
+            out.status, out.response = status, resp
+            out.stopped = True
+            out.stop_reason = NOT_SCHEMA.get(status, f"API error {status} - outcome unknown, not replayed"
+                                             if status >= 500 else f"API error {status} - not a schema problem")
+            out.trace.append({"step": "Stop and report", "ok": False, "detail": out.stop_reason})
             return out
         self.registry.record_failure(td)     # a failing canary is rolled back
         t0 = time.perf_counter()
@@ -308,7 +328,11 @@ class SelfHealer:
             td = decision
             self.registry.add(td)
             self._log(case_id, tool, td, out)
-            status, resp = self._send(client, td, args, out, label=f"retry with tool v{td.version} ({td.status})")
+            try:
+                status, resp = self._send(client, td, args, out, label=f"retry with tool v{td.version} ({td.status})",
+                                          key=key, is_retry=True)
+            except TransportError as e:
+                return self._transport_stop(out, e)
             if status < 400:
                 self.registry.record_success(td)
                 out.success, out.status, out.response = True, status, resp
@@ -325,10 +349,19 @@ class SelfHealer:
         return out
 
     # -- internals
-    def _send(self, client, td: ToolDef, args, out: Outcome, label: str):
+    def _transport_stop(self, out: Outcome, e: TransportError) -> Outcome:
+        if e.kind in ("circuit_open", "rate_limited", "retry_budget"):
+            out.calls -= 1                 # blocked locally, never left the process
+        out.stopped = True
+        out.stop_reason = f"{e.kind}: {e}"
+        out.trace.append({"step": "Stop and report", "ok": False, "detail": out.stop_reason})
+        return out
+
+    def _send(self, client: Transport, td: ToolDef, args, out: Outcome, label: str, key: str, is_retry=False):
         body, headers = td.build(args, self.config)
-        r = client.post(td.path, json=body, headers=headers)
-        out.calls += 1
+        out.calls += 1                     # counted even if the answer never arrives
+        r = client.send("POST", td.path, tool=td.name, json=body, headers=headers, idempotency_key=key,
+                        is_retry=is_retry)
         out.sent.append({"body": body, "headers": headers, "status": r.status_code})
         payload = r.json()
         out.trace.append({"step": f"Request: {label}", "ok": r.status_code < 400,
