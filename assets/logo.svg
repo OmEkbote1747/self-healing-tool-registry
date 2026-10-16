@@ -1,6 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="240" height="48" viewBox="0 0 240 48">
-  <rect x="2" y="6" width="36" height="36" rx="10" fill="#1565C0"/>
-  <path d="M12 25.5l5.5 5.5L29 18.5" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="48" y="22" font-family="Inter, Helvetica, Arial, sans-serif" font-size="15" font-weight="800" fill="#0F1E33">SchemaHeal</text>
-  <text x="48" y="39" font-family="Inter, Helvetica, Arial, sans-serif" font-size="11" fill="#5B6B80">Self-healing tool registry</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="48" viewBox="0 0 220 48">
+  <rect x="2" y="6" width="36" height="36" rx="9" fill="#2563EB"/>
+  <path d="M10 33 L20 13 L30 33" fill="none" stroke="#fff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M14.5 25 L25.5 25" stroke="#93C5FD" stroke-width="3" stroke-linecap="round"/>
+  <text x="48" y="24" font-family="Helvetica, Arial, sans-serif" font-size="17" font-weight="800" fill="#F8FAFC" letter-spacing="1.5">ADAPTIX</text>
+  <text x="48" y="40" font-family="Helvetica, Arial, sans-serif" font-size="10.5" fill="#93A4C3">APIs change. ADAPTIX adapts.</text>
 </svg>

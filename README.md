@@ -1,132 +1,157 @@
-# SchemaHeal: a guarded OpenAPI request adapter for AI agents (prototype)
+# ADAPTIX: autonomous API resilience
 
-PS-01 · Genesis 2.0, Track EVA 02 · Team Runtime Terrors
+**APIs change. ADAPTIX adapts.**
 
-When an API changes its request schema, an agent's tool calls start failing with `422`. SchemaHeal sits
-between the agent and its tools. It reads the error and the new `/openapi.json`, and then does one of three things:
+PS-01 · Genesis 2.0 · Team Runtime Terrors (Paras Patil, Nitish Shidne, Sanchit Tawde, Om Ekbote)
 
-| Outcome | When |
-|---|---|
-| **Repairs automatically** | the change is tightly defined and reversible (see the boundary below) |
-| **Holds for a human** | the repair passes validation but could be wrong in meaning (medium-confidence match, a different entity name, a unit word, an LLM suggestion, or a tool whose policy says so) |
-| **Stops and reports** | a required value does not exist, a value is not allowed, the method or body format changed, auth changed, or the API failed in a way that is not a schema problem |
+When an API that an AI agent depends on changes its schema, ADAPTIX:
 
-It never invents a value: every value it sends comes from the agent's own arguments (after a lossless
-conversion) or from approved configuration.
+1. detects the failure;
+2. decides whether it really is schema drift;
+3. reads the authoritative schema;
+4. plans a repair and validates it independently;
+5. applies the repair as a new tool version;
+6. retries the original task and verifies it.
 
-> This is a prototype. It is not general "self-healing": a schema-valid request can still be wrong in
-> meaning, so anything ambiguous goes to a person. Results below come from cases written by our team
-> against our own mock API.
+Supported repairs run **autonomously, with no human approval step**. A repair that is ambiguous, unsafe or unverifiable stops with a plain-language reason. A repair that fails verification is rolled back.
 
-## Automatic repair boundary
+> Honest scope: all evaluation numbers below come from **simulated upstreams** (in-process FastAPI apps, `sim://…`) and from cases our team wrote. They are not measurements of production incidents.
 
-Applied without a human only when **all** hold:
-
-- a renamed or moved field matches an orphaned argument with similarity ≥ 75, and no other candidate is close;
-- the names do not refer to different things (`channel_id → thread_id` is held) and no unit word changed
-  (`amount → amount_cents`, `timeout_ms → timeout_seconds` are held);
-- type changes are lossless (`"3" → 3` yes, `"3.5" → int` stop, `"yes" → bool` stop);
-- enum values are still allowed and dates are ISO;
-- new headers come from approved configuration;
-- the tool's policy allows automatic repair (e.g. payments can be set to always need approval);
-- the repaired request validates against the new schema before it is sent.
-
-Automatic repairs then start as a **canary** used only by the agent that made them. They are shared after
-3 successful calls, and rolled back if they fail.
-
-## Architecture
+## Pipeline
 
 ```
-agent ──► SchemaHeal (Streamlit console or middleware API)
-            ├─ transport: timeouts, pooling, rate limit, circuit breaker, retry budget, idempotency key
-            ├─ schema reader: /openapi.json → body/query/path fields, required, enum, format, arrays, unions
-            ├─ Tier 1 rules → (Tier 2 LLM, names and types only) → policy gate → validator
-            ├─ durable registry (SQLite): tenant-scoped versions, proposals, policies, events
-            └─ redacted traces and audit log
-                    │
-                    ▼
-                 the API
+agent ──► /api/repair/execute  or  /v1/openai/tool_calls
+            A  execute the call (timeouts, idempotency key, credential from the registry)
+            B  classify the failure  ── auth / rate limit / 5xx / business rule / invalid input are NOT drift
+            C  discover the authoritative schema (OpenAPI or JSON Schema; fail closed if unavailable)
+            D  diff registered vs live (renames, moves, type/required/enum/format, headers, response fields)
+            E  plan: deterministic rules first; Gemini only for what the rules cannot ground
+            F  validate independently (evidence grounding, lossless transforms, schema, credentials, provenance)
+            G  apply atomically as a new version (optimistic concurrency + per-tool lock)
+            H  rebuild the request from the caller's original arguments
+            I  retry, bounded (backoff + jitter, honours Retry-After, total time budget)
+            J  verify the task actually succeeded (status + applied values); repair response drift if needed
+            K  roll back if verification fails
 ```
 
-| File | What it does |
+What is never treated as schema drift: 401/403 (credential problems; failover only to another *authorised* credential), 404, 429, 5xx, business-rule errors, and invalid input against an *unchanged* schema. A 400 or 422 counts as drift only when the live schema actually changed in a way that touches the failing request.
+
+## Repository layout
+
+| Path | Purpose |
 |---|---|
-| `adaptix/healer.py` | orchestration: diagnose, map, convert, validate, gate, patch, retry once |
-| `adaptix/policy.py` | repair policy: confidence thresholds, entity and unit checks, per-tool overrides |
-| `adaptix/schema.py` | OpenAPI operation reader (methods, params, optional/enum/array/union/format fields) |
-| `adaptix/transport.py` | timeouts, pooling, rate limit, circuit breaker, retry budget, idempotency, replay rules |
-| `adaptix/store.py` | durable tenant-scoped registry: versions, proposals, policies, events (SQLite) |
-| `adaptix/security.py` | redaction, secrets from the environment, audit retention |
-| `adaptix/llm.py` | optional Tier 2: an LLM picks which existing argument fits (never values; always reviewed) |
-| `adaptix/service.py` | middleware API with tenant keys and roles, review queue, OpenAI tool-calling adapter |
-| `adaptix/client.py` | Python SDK for the service |
-| `adaptix/baselines.py` | retry-loop and greedy error-reading baselines |
-| `adaptix/mock_api.py` | mock API with schema drift, idempotency, fault injection |
-| `adaptix/cases.py`, `fixtures/` | 125 planned cases, 10 stress cases, 30 adversarial JSON fixtures |
-| `app.py`, `views/` | Streamlit console (landing page, demo, benchmark, review queue, API docs) |
+| `adaptix/engine.py` | the pipeline A–K, the incident timeline, reuse of known mappings, loop prevention |
+| `adaptix/classify.py` | failure classification with a plain-language explanation per category |
+| `adaptix/schema.py`, `adaptix/diff.py` | authoritative schema parsing (OpenAPI / JSON Schema) and the drift report |
+| `adaptix/planner.py`, `adaptix/validator.py` | rule planner and the independent validator (the LLM never bypasses it) |
+| `adaptix/llm/gemini.py` | Gemini via the official `google-genai` SDK, structured output validated with Pydantic |
+| `adaptix/llm/mock.py` | deterministic **mock**, used only in tests and always labelled "mock (not a real model)" |
+| `adaptix/credentials.py` | credential registry: aliases, groups, scopes, states, authorised failover |
+| `adaptix/security.py` | redaction and secret scrubbing for logs, audit payloads, errors and prompts |
+| `adaptix/storage.py` | SQLite (WAL): tools, versions, schema snapshots, incidents, events, executions, mappings, locks |
+| `adaptix/verify.py`, `adaptix/upstreams.py` | task verification; pooled HTTP client and in-process simulated upstreams |
+| `adaptix/api.py` | FastAPI backend (`/api/*`, OpenAI-compatible adapter), admin auth, CORS, size limits |
+| `adaptix/simulation.py`, `adaptix/mock_api.py` | Chaos Lab: 19 drift/failure scenarios against simulated APIs |
+| `adaptix/evaluation.py`, `adaptix/cases.py`, `fixtures/` | baseline vs ADAPTIX: 19 scenarios, 125 planned cases, 30 adversarial fixtures |
+| `adaptix/metrics.py` | dashboard metrics computed only from stored records |
+| `app.py`, `views/` | Streamlit dashboard: Overview, Tool Registry, Schema Drift Explorer, Recovery Center, Audit & Evaluation, Chaos Lab, System Health |
+| `tests/` | pytest suite (see below) |
 
 ## Run it
 
 ```bash
 python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
-.venv/bin/streamlit run app.py                     # console
-.venv/bin/python -m pytest -q                      # 76 tests
-.venv/bin/python -m adaptix.bench                 # all suites, three agents
-SCHEMAHEAL_API_KEYS="acme:agent:AGENT_KEY,acme:reviewer:REVIEW_KEY" \
-  .venv/bin/uvicorn adaptix.service:app --port 8000   # middleware API, docs at /docs
+cp .env.example .env                                   # fill in on the server only; never commit .env
+.venv/bin/streamlit run app.py                         # dashboard (runs the API in-process)
+.venv/bin/uvicorn adaptix.api:app --port 8000          # standalone API, OpenAPI docs at /docs
+.venv/bin/python -m pytest -q                          # tests
+.venv/bin/python -m adaptix.evaluation --suite planned # baseline vs ADAPTIX (scenarios | planned | adversarial)
 ```
 
-Secrets: header values come from `SCHEMAHEAL_SECRET_<NAME>` environment variables (e.g.
-`SCHEMAHEAL_SECRET_X_API_KEY`) or Streamlit secrets, never from code. Optional LLM tier: set `ANTHROPIC_API_KEY`.
+To point the dashboard at a separately deployed API, set `ADAPTIX_API_URL` and `ADAPTIX_ADMIN_TOKEN`.
 
-## Middleware API (first integration target: OpenAI-compatible function calling)
+### API (all `/api/*` routes need `Authorization: Bearer $ADAPTIX_ADMIN_TOKEN`)
 
-```python
-from adaptix.client import SchemaHealClient
-sh = SchemaHealClient("http://localhost:8000", api_key=AGENT_KEY)
-sh.register_tool("update_user", base_url="https://api.example.com", path="/users/update",
-                 arg_schema={"user_id": "str", "email": "str"})
-resp = llm.chat.completions.create(model=MODEL, messages=messages, tools=sh.openai_tools())
-messages += sh.handle_tool_calls(resp.choices[0].message.tool_calls)
-```
+| Method and path | Purpose |
+|---|---|
+| `GET /api/health/live` | liveness check (no auth) |
+| `GET /api/health` | DB, LLM status, credential aliases, limits |
+| `POST /api/health/llm-check` | sends one minimal **real** request to the configured provider |
+| `GET/POST /api/tools`, `GET/DELETE /api/tools/{name}` | registry (registration reads the authoritative schema) |
+| `GET /api/tools/{name}/versions`, `/drift` | version history; registered vs live schema |
+| `POST /api/tools/{name}/rollback` | restore the parent version |
+| `POST /api/repair/execute` | run a tool call through the pipeline |
+| `POST /api/repair/analyze` | diagnose and plan **without sending anything** |
+| `GET /api/incidents[/{id}]`, `GET /api/audit`, `GET /api/metrics` | records, audit log, metrics |
+| `GET/POST /api/simulations`, `POST /api/simulations/reset` | Chaos Lab (simulated data only) |
+| `POST /api/evaluation`, `GET /api/evaluation/latest` | baseline vs ADAPTIX evaluation |
+| `GET /v1/openai/tools`, `POST /v1/openai/tool_calls` | OpenAI-compatible tool calling (see `examples/openai_agent_loop.py`) |
 
-Endpoints: `POST /v1/tools`, `GET /v1/openai/tools`, `POST /v1/openai/tool_calls`, `POST /v1/tools/{name}/call`,
-`GET /v1/tools/{name}/versions`, `GET /v1/repairs`, `POST /v1/repairs/{id}/approve|reject`,
-`POST /v1/tools/{name}/rollback`, `PUT /v1/policies/{tool}`, `GET /v1/events`. Keys map to a tenant and a role
-(agent or reviewer); every query is tenant-scoped.
+## Configuration
 
-## Results
+See [.env.example](.env.example) for every variable. The main ones:
 
-Same cases for three agents. "False repairs" are wrong requests that were actually sent.
+| Variable | Default | Meaning |
+|---|---|---|
+| `GEMINI_API_KEY` | unset | enables the Gemini tier. Without it, gaps the rules cannot ground stop safely |
+| `GEMINI_API_KEY_SECONDARY` | unset | optional second authorised key, used for failover only |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | model name |
+| `LLM_TIMEOUT_SECONDS`, `LLM_MAX_RETRIES`, `LLM_MIN_CONFIDENCE` | 20, 2, 0.8 | LLM request limits; plans below the confidence floor are rejected |
+| `ADAPTIX_CREDENTIALS` | unset | JSON credential registry. Values are read from the env vars it names, never stored |
+| `ADAPTIX_MAX_REPAIR_ATTEMPTS`, `ADAPTIX_MAX_RETRIES`, `ADAPTIX_TIME_BUDGET_SECONDS` | 2, 2, 30 | repair and retry bounds |
+| `ADAPTIX_ADMIN_TOKEN` | random per process | bearer token for `/api/*` |
+| `ADAPTIX_CORS_ORIGINS` | empty (CORS off) | comma-separated allowed origins |
+| `ADAPTIX_MAX_BODY_BYTES` | 256000 | larger requests are rejected with 413 |
+| `ADAPTIX_DB_PATH`, `ADAPTIX_RETENTION_DAYS` | `data/adaptix.db`, 30 | storage and retention |
 
-| Suite | Agent | Zero-touch fixed | Held for approval | Safe stops | False repairs | Invented values |
-|---|---|---|---|---|---|---|
-| 125 planned | Retry loop | 0 / 85 | 0 | 40 / 40 | 0 | 0 |
-| | Greedy error-reader | 60 / 85 | 0 | 0 / 40 | 40 | 30 |
-| | **SchemaHeal** | **79 / 85 (93%)** | 6 | **40 / 40** | **0** | **0** |
-| 10 stress | Greedy error-reader | 4 / 5 | 0 | 1 / 5 | 4 | 6 |
-| | **SchemaHeal** | 2 / 5 | 3 | **5 / 5** | **0** | **0** |
-| 30 adversarial | Greedy error-reader | 12 / 13 | 0 | 6 / 17 | 11 | 5 |
-| | **SchemaHeal** | 10 / 13 (77%) | 7 | **17 / 17** | **0** | **0** |
+On Streamlit Cloud, put these under the app's **Secrets**. `config.env()` reads environment variables first, then `st.secrets`.
 
-Median time from a failed call to recovery or a safe stop is a few milliseconds against the in-process mock.
-The greedy baseline is a heuristic stand-in for an error-reading LLM agent, not a real model.
+### Gemini
 
-## Production readiness
+- Uses `google-genai==2.31.0`: `client.models.generate_content(model=…, contents=…, config=GenerateContentConfig(system_instruction=…, response_mime_type="application/json", response_json_schema=LLMRepairPlan schema, temperature=0))`.
+- The SDK's own retries are disabled. ADAPTIX applies its own bounded retries, timeouts and failover.
+- The model receives field names, types, documentation and the arguments' **names**, never their values. Schema text is marked as untrusted data.
+- Every mapping must quote evidence that appears verbatim in the schema. The independent validator re-checks every plan; the LLM cannot approve its own repair.
+- The connectivity status stays "configured, not yet verified" until a real request succeeds (`POST /api/health/llm-check`, or a plan call).
+- `tests/test_gemini_live.py` makes a real call and runs only when `GEMINI_API_KEY` is set. All other Gemini tests use a **fake SDK client** and are not live-provider tests.
 
-| Gap | Status | What exists | Still open |
-|---|---|---|---|
-| Middleware / agent integration | **Partial** | FastAPI service, SDK, OpenAI-compatible adapter, tenant keys and roles | MCP server, agent-framework adapters, real upstream trial |
-| Unsafe automatic repair | **Addressed in prototype** | confidence thresholds, entity and unit checks, per-tool policies, review queue, canary rollout, auto-rollback | semantic compatibility rules per domain; approval UX for teams |
-| Schema coverage | **Partial** | methods, query/path params, optional, enums, arrays, unions, date format, content-type check | auth scheme changes, oneOf discriminators, non-JSON payloads, response-schema drift |
-| Durable registry | **Partial** | SQLite with tenants, atomic versioning, conflict checks, rollback history, events | Postgres for multi-host, migrations tooling, cache invalidation across hosts |
-| Security and privacy | **Partial** | redaction, masked error echoes, env/platform secrets, value-free LLM prompts, retention | encrypted secret store/KMS, SSO/RBAC, per-tenant secrets, incident response |
-| Request handling | **Addressed in prototype** | timeouts, pooling, rate limit, circuit breaker, retry budget, idempotency keys, no replay after timeouts/5xx | distributed rate limits and breakers, backoff policies per upstream |
-| Evaluation | **Partial** | stronger baseline, adversarial fixtures, separate false-repair and safe-stop rates | independently sourced real API changes, staged deployment with auto-repair off by default |
+### Credential failover: what it does and does not do
 
-## Honest limits
+- Failover moves to another configured credential **in the same group**, with a scope that permits the call, and only for the categories listed in that credential's `failover_on` setting (by default: `rate_limited`, `credential_expired`).
+- An invalid or revoked credential is marked as such and is never modified, retried with variations, or "repaired". An authentication error is never treated as schema drift.
+- It cannot create, refresh or rotate credentials; an operator must supply new ones. Credential state is held in process memory and resets on restart.
 
-- Every suite was written by our team and runs against our own mock API.
-- Name similarity cannot prove two fields mean the same thing; that is why medium-confidence and
-  different-entity matches go to a human.
-- The LLM tier is implemented but was not used in these results (no API key was set).
-- SQLite suits one host; multi-instance deployments need Postgres behind the same interface.
+## Results (simulated upstreams, measured on 2026-10-16, no LLM key configured)
+
+"Baseline" makes the same call with repair disabled, so every drifted call fails.
+
+| Suite | Cases | Recovered (repairable) | Safe stop (unrepairable) | Incorrect patches accepted | Median recovery |
+|---|---|---|---|---|---|
+| Chaos Lab scenarios | 19 | 8 / 8 (100%) | 10 / 10 (100%) | 0 | 6.7 ms |
+| Planned schema changes | 125 | 79 / 85 (92.9%) | 40 / 40 (100%) | 0 | 6.7 ms |
+| Adversarial fixtures | 30 | 10 / 13 (76.9%) | 17 / 17 (100%) | 0 | 6.7 ms |
+
+The repairable cases ADAPTIX did not recover are **safe misses**: it stopped instead of guessing, and no wrong data was sent. Examples: `uid`, `user_identifier`, `room_ref` and `phone → mobile` with no documentation linking the names, and the scenario that needs an LLM. Recovery times are against in-process simulations. They exclude network latency and LLM latency.
+
+## Tests
+
+`python -m pytest -q` → 126 passed, 2 skipped. The two skipped tests are the live Gemini tests, which need `GEMINI_API_KEY`. The suite covers:
+
+- every Chaos Lab scenario, plus baseline mode;
+- classification, including that auth errors are never repaired;
+- that a plain success creates no incident;
+- side effects and idempotency, Retry-After handling and the time budget;
+- that a 503 is not replayed for non-idempotent calls;
+- loop prevention, concurrency, rollback, and response-drift repair without resending;
+- the validator, transforms, credential failover, and the Gemini adapter (fake client and real SDK error types);
+- the API: auth, 413, CORS, analyze-without-sending, the OpenAI adapter, and no secret leakage;
+- smoke tests for every dashboard page.
+
+## Limitations
+
+- The evaluation uses simulated APIs and team-written cases. Independently sourced, real API changes are still needed.
+- **No real Gemini request has been run in this repository's evaluation** (no key was available). The Gemini adapter is tested against a fake client and the SDK's real error types only.
+- Name similarity and documentation cannot prove two fields mean the same thing. When the evidence is not explicit, ADAPTIX stops.
+- SQLite suits one host. Multiple instances need a shared database and a distributed lock. Credential state is in memory.
+- On Streamlit Cloud the SQLite file is ephemeral, so records reset when the app restarts.
+- Not yet covered: auth-scheme migrations, `oneOf` discriminators, non-JSON payloads and pagination changes.

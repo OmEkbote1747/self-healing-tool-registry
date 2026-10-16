@@ -15,9 +15,28 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 MASK = "***"
-SENSITIVE = re.compile(r"(auth|api[-_]?key|token|secret|password|passwd|cookie|session|signature|ssn|"
-                       r"card|cvv|iban|account[-_]?number|pin\b|otp)", re.I)
+SENSITIVE = re.compile(r"(auth|api[-_]?key|^token$|[-_]token$|^bearer|secret|password|passwd|cookie|"
+                       r"session[-_]?(id|key|token)?$|signature|ssn|card|cvv|iban|account[-_]?number|\bpin\b|otp)", re.I)
 SAFE_HEADERS = {"content-type", "accept", "x-client-version", "idempotency-key"}
+
+
+_KNOWN_SECRETS: set[str] = set()
+
+
+def register_secret(value: str):
+    """Every configured secret value is scrubbed from all text that passes through redact()/scrub()."""
+    if value and len(value) >= 6:
+        _KNOWN_SECRETS.add(value)
+
+
+def scrub(text: str) -> str:
+    """Remove any known secret value (and anything that looks like a bearer token) from free text."""
+    if not isinstance(text, str):
+        return text
+    for s in sorted(_KNOWN_SECRETS, key=len, reverse=True):
+        if s in text:
+            text = text.replace(s, MASK)
+    return re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}", r"\1" + MASK, text)
 
 
 def _shape(v) -> str:
@@ -30,8 +49,10 @@ def redact(obj, key: str | None = None):
         return MASK
     if isinstance(obj, dict):
         return {k: redact(v, k) for k, v in obj.items()}
-    if isinstance(obj, list):
+    if isinstance(obj, (list, tuple)):
         return [redact(v) for v in obj]
+    if isinstance(obj, str):
+        return scrub(obj)
     return obj
 
 
@@ -50,25 +71,6 @@ def redact_reply(payload):
             detail.append(e)
         return {**payload, "detail": detail}
     return redact(payload)
-
-
-def get_secret(name: str, default: str | None = None) -> str | None:
-    """Environment first (SCHEMAHEAL_SECRET_<NAME>), then Streamlit secrets, else default."""
-    env = "SCHEMAHEAL_SECRET_" + re.sub(r"[^A-Z0-9]", "_", name.upper())
-    if os.environ.get(env):
-        return os.environ[env]
-    try:
-        import streamlit as st
-        if name in st.secrets:
-            return str(st.secrets[name])
-    except Exception:
-        pass
-    return default
-
-
-def demo_secret() -> str:
-    """A throwaway per-process value for the demo, so no real-looking credential lives in the code."""
-    return "demo-" + _secrets.token_urlsafe(12)
 
 
 def purge_audit_log(path: str | Path, retention_days: int = 30) -> int:
