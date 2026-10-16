@@ -85,13 +85,16 @@ class Engine:
         self.upstreams = upstreams or Upstreams(settings.request_timeout_s, mode=self.mode)
         if self.upstreams.mode != self.mode:
             raise EngineError(f"{self.mode} storage cannot be paired with {self.upstreams.mode} upstreams")
-        if self.mode == "production" and getattr(llm, "name", "").startswith("mock"):
-            raise EngineError("the production pipeline never uses the mock LLM")
+        if self.mode != "simulation" and getattr(llm, "name", "").startswith("mock"):
+            raise EngineError(f"the {self.mode} pipeline never uses the mock LLM")
         self.sleep = sleep
+        # llm_required: the LLM must propose every changed mapping (the rules plan is recorded only as a
+        # cross-check). If the LLM is unavailable or its output is invalid, the repair stops - no fallback.
+        self.llm_required = False
 
     def set_llm(self, llm):
-        if self.mode == "production" and getattr(llm, "name", "").startswith("mock"):
-            raise EngineError("the production pipeline never uses the mock LLM")
+        if self.mode != "simulation" and getattr(llm, "name", "").startswith("mock"):
+            raise EngineError(f"the {self.mode} pipeline never uses the mock LLM")
         self.llm = llm
 
     # ================================================================ schema discovery (C)
@@ -305,7 +308,7 @@ class Engine:
         if spec is None:
             raise EngineError(f"unknown tool {tool}")
         inc = Incident(tool=tool, simulated=spec.simulated, scenario=scenario, healing=heal,
-                       correlation_id=correlation_id or uuid.uuid4().hex)
+                       environment=self.storage.environment, correlation_id=correlation_id or uuid.uuid4().hex)
         t0, deadline = time.perf_counter(), time.monotonic() + self.s.total_time_budget_s
         td = self.storage.current(tool)
         inc.from_version = td.version
@@ -404,10 +407,28 @@ class Engine:
                     "info", {"plan": plan.model_dump(include={"mappings", "header_sources"})})
             return plan
         plan = plan_request(td, spec, new, args, self.creds, self.s.auto_min_similarity)
-        inc.add("plan", f"Rules planner: {len(plan.mappings)} mapping(s), {len(plan.unresolved)} unresolved",
+        inc.add("plan", f"Rules planner: {len(plan.mappings)} mapping(s), {len(plan.unresolved)} unresolved"
+                + (" (cross-check only: this run requires the LLM to propose the repair)" if self.llm_required else ""),
                 "ok" if not plan.unresolved else "warn",
-                {"evidence": plan.evidence, "risks": plan.compatibility_risks, "unresolved": plan.unresolved})
-        field_unresolved = [u for u in plan.unresolved if not u.startswith("header:")]
+                {"evidence": plan.evidence, "risks": plan.compatibility_risks, "unresolved": plan.unresolved,
+                 "mappings": [m.model_dump() for m in plan.mappings]})
+        if self.llm_required:
+            kept = [m for m in plan.mappings if m.evidence == "unchanged field"]
+            targets = [loc for loc in new.fields if loc not in {m.target_field for m in kept}]
+            headers_unresolved = [u for u in plan.unresolved if u.startswith("header:")]
+            inc.add("plan", f"LLM required for {len(targets)} changed field(s): {', '.join(targets)[:200]}", "info")
+            usable = getattr(self.llm, "real", False) or getattr(self.llm, "test_double", False)
+            if not (usable and self.llm.configured()):
+                inc.add("plan", "No real LLM is configured; not falling back to rules or a mock", "fail")
+                return plan.model_copy(update={"source": "llm", "mappings": kept, "confidence": 0.0,
+                                               "unresolved": [t for t in targets if new.fields[t].required]
+                                               + headers_unresolved})
+            plan = plan.model_copy(update={"source": "llm", "mappings": kept, "confidence": 0.0,
+                                           "unresolved": [t for t in targets if new.fields[t].required]
+                                           + headers_unresolved})
+            field_unresolved = targets
+        else:
+            field_unresolved = [u for u in plan.unresolved if not u.startswith("header:")]
         if field_unresolved and self.llm.configured():
             used = {m.source_arg for m in plan.mappings}
             ctx = {"tool": spec.name, "drift_summary": report.summary,

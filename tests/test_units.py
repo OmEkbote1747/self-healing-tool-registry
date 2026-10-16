@@ -181,3 +181,11 @@ def test_rejected_key_is_never_reused_or_modified():
 def test_status_never_contains_secret_values():
     text = str(_reg().status())
     assert "secret-value" not in text and "alias" in text
+
+
+def test_schema_fingerprints_are_not_mistaken_for_secrets():
+    from adaptix.security import redact
+    out = redact({"old_signature": "abc123", "new_signature": "def456", "x-signature": "s3cr3t", "scorecard": {"n": 1},
+                  "card_number": "4111"})
+    assert out["old_signature"] == "abc123" and out["new_signature"] == "def456" and out["scorecard"] == {"n": 1}
+    assert out["x-signature"] != "s3cr3t" and out["card_number"] != "4111"

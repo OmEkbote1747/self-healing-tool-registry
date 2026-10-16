@@ -58,7 +58,8 @@ def invalid_key():
 def test_structured_plan_is_parsed_and_usage_recorded():
     p, calls = provider([json.dumps(GOOD)])
     r = p.plan({"unresolved_fields": []})
-    assert r.ok and r.real and r.plan.confidence == 0.93
+    assert r.ok and r.plan.confidence == 0.93
+    assert not r.real                      # a fake SDK client is a test double: never labelled a real request
     assert r.prompt_tokens == 120 and r.output_tokens == 40 and r.credential_alias == "gemini-primary"
     assert calls[0]["schema"]["additionalProperties"] is False
     assert p.status()["connectivity"] == "verified"
@@ -122,7 +123,8 @@ def test_engine_uses_gemini_plan_for_prose_documented_rename(make_engine):
     p, calls = provider([json.dumps(GOOD)])
     eng = make_engine(llm=p)
     r = sim.run(eng, "window-rename-llm")
-    assert r["outcome"] == "recovered" and r["matches_expectation"]
+    assert r["outcome"] == "recovered"
+    assert r["llm"]["used"] and r["llm"]["real"] is False and r["llm"]["label"] == "not a real request (test double)"
     inc = eng.storage.incident(r["incident"])
     assert inc.llm["provider"] == "gemini" and inc.llm["prompt_tokens"] == 120
     # the prompt carried names, types and schema text - never the caller's values

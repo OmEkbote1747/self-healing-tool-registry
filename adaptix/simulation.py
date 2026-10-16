@@ -117,6 +117,10 @@ SCENARIOS: list[Scenario] = [
     Scenario("rate-limit", "Rate limit with Retry-After", "Transient",
              "The API answers 429 with Retry-After once, then succeeds.",
              U, U, UA, "recovered", "rate_limited", v2_faults={"fail_times": 1, "retry_after": 0.2}),
+    Scenario("server-error", "Upstream outage (503)", "Transient",
+             "The API fails with 503 on every call. Bounded retries happen, then ADAPTIX stops: an outage is not "
+             "schema drift, so no repair is generated.",
+             U, U, UA, "stopped", "server_error", v2_faults={"status": 503}),
     Scenario("verification-rollback", "Repair accepted but task not applied", "Verification",
              "After a rename, the API returns 200 but reports 'no_change'; the repair must be rolled back.",
              U, {"userId": "str", "email": "str"}, UA, "rolled_back", "schema_drift",
@@ -135,21 +139,57 @@ SCENARIOS: list[Scenario] = [
 BY_ID = {s.id: s for s in SCENARIOS}
 
 
-def install(engine, s: Scenario, run_id: str, mode: str) -> str:
-    """Install the v1 simulated API, register the tool against it, then mutate the API to v2."""
-    name = f"{s.id}-{mode}-{run_id}"
-    group = None
-    if "x-api-key" in s.v2_headers + s.v1_headers:
-        group = f"sim-{s.id}"
-        engine.creds.add_simulated_group(group, "x-api-key", [f"{group}-a", f"{group}-b"])
-    engine.upstreams.set_simulated(name, make_app(s.path, s.v1, s.v1_headers, title=s.title, method=s.method))
-    spec = ToolSpec(name=name, base_url=f"sim://{name}", path=s.path, method=s.method, description=s.description,
-                    auth_header="x-api-key" if group else None, credential_group=group, simulated=True)
-    engine.register(spec)
-    engine.upstreams.set_simulated(name, make_app(
-        s.path, s.v2, s.v2_headers, title=s.title, method=s.v2_method or s.method, content_type=s.v2_content_type,
-        response=s.v2_response, faults=dict(s.v2_faults or {})))
-    return name
+def build_app(s: Scenario, phase: str, keys: dict | None = None):
+    """The scenario's API at phase v1 (registration) or v2 (after the change). `keys` = {"a", "b"} test keys."""
+    if s.auth:
+        a, b = (keys or {}).get("a"), (keys or {}).get("b")
+        if phase == "v1":
+            auth = {"header": "x-api-key", "valid": [a, b]}
+        elif s.auth == "expired_primary":
+            auth = {"header": "x-api-key", "valid": [b], "expired": [a]}
+        else:
+            auth = {"header": "x-api-key", "valid": []}
+        return make_app(s.path, s.v1 if phase == "v1" else s.v2, title=s.title, auth=auth)
+    if phase == "v1":
+        return make_app(s.path, s.v1, s.v1_headers, title=s.title, method=s.method)
+    return make_app(s.path, s.v2, s.v2_headers, title=s.title, method=s.v2_method or s.method,
+                    content_type=s.v2_content_type, response=s.v2_response, faults=dict(s.v2_faults or {}))
+
+
+class SimTarget:
+    """In-process simulated APIs (sim://). Environment SIMULATION."""
+    environment = "SIMULATION"
+
+    def __init__(self, engine):
+        self.engine = engine
+
+    def base_url(self, name: str) -> str:
+        return f"sim://{name}"
+
+    def install(self, name: str, s: Scenario, phase: str, keys: dict | None = None):
+        self.engine.upstreams.set_simulated(name, build_app(s, phase, keys))
+
+    def stats(self, name: str) -> dict:
+        app = self.engine.upstreams.sim_app(name)
+        return {"calls": app.state.calls, "effects": app.state.effects}
+
+
+class ServiceTarget:
+    """The controlled test service: a real HTTP server (REAL_API_TEST). Versions are switched over HTTP."""
+    environment = "REAL_API_TEST"
+
+    def __init__(self, service):
+        self.service = service
+
+    def base_url(self, name: str) -> str:
+        return f"{self.service.url}/m/{name}"
+
+    def install(self, name: str, s: Scenario, phase: str, keys: dict | None = None):
+        self.service.install(name, s.id, phase, keys)
+
+    def stats(self, name: str) -> dict:
+        d = self.service.stats(name)
+        return {"calls": d["calls"], "effects": d["effects"]}
 
 
 class SimulationError(RuntimeError):
@@ -161,45 +201,72 @@ def require_simulation(engine):
         raise SimulationError("simulations run only on the simulation engine, never against production")
 
 
-def run(engine, scenario_id: str, seed: int = 7, heal: bool = True) -> dict:
-    """Run one scenario. Deterministic for a given seed (ids are derived from it)."""
-    require_simulation(engine)
-    s = BY_ID[scenario_id]
-    rnd = random.Random(f"{scenario_id}:{seed}:{heal}")
-    run_id = f"{seed}-{rnd.randrange(16 ** 6):06x}"
-    mode = "adaptix" if heal else "baseline"
-    if s.auth:
-        return _run_auth(engine, s, run_id, mode, heal)
-    name = install(engine, s, run_id, mode)
-    res = engine.execute(name, dict(s.args), scenario=s.id, heal=heal)
-    return _summarize(s, mode, res, engine.upstreams.sim_app(name), expected_outcome(s, engine, heal), engine)
+def _target_for(engine, target):
+    if target is None:
+        require_simulation(engine)
+        return SimTarget(engine)
+    if isinstance(target, ServiceTarget) and engine.mode != "real_api_test":
+        raise SimulationError("the controlled test service is used only by the REAL_API_TEST engine")
+    if isinstance(target, SimTarget):
+        require_simulation(engine)
+    return target
 
 
-def _run_auth(engine, s: Scenario, run_id: str, mode: str, heal: bool) -> dict:
-    """Auth scenarios: the API requires x-api-key from v1 on; v2 changes the key's status, not the schema."""
+def _prepare(engine, s: Scenario, run_id: str, mode: str, target, heal: bool = True) -> tuple[str, str | None]:
+    """Install v1, register the tool against it, then switch the API to v2. Returns (tool name, key group)."""
     name = f"{s.id}-{mode}-{run_id}"
-    group = f"sim-{s.id}"
-    keys = engine.creds.add_simulated_group(group, "x-api-key", [f"{group}-a", f"{group}-b"])
-    a, b = keys[f"{group}-a"], keys[f"{group}-b"]
-    engine.upstreams.set_simulated(name, make_app(s.path, s.v1, title=s.title, auth={"header": "x-api-key", "valid": [a, b]}))
-    spec = ToolSpec(name=name, base_url=f"sim://{name}", path=s.path, description=s.description,
-                    auth_header="x-api-key", credential_group=group, simulated=True)
-    engine.register(spec)
-    for c in engine.creds._creds:                         # fresh state for this run's simulated keys
-        if c.group == group:
-            c.state, c.cooldown_until = "unverified", 0.0
-    if not heal:                                          # baseline: no failover
+    prefix = "sim" if target.environment == "SIMULATION" else "test"
+    group, keys = None, None
+    if s.auth or "x-api-key" in s.v2_headers + s.v1_headers:
+        group = f"{prefix}-{s.id}"
+        made = engine.creds.add_simulated_group(group, "x-api-key", [f"{group}-a", f"{group}-b"])
+        keys = {"a": made[f"{group}-a"], "b": made[f"{group}-b"]}
+    target.install(name, s, "v1", keys if s.auth else None)
+    engine.register(ToolSpec(name=name, base_url=target.base_url(name), path=s.path, method=s.method,
+                             description=s.description, auth_header="x-api-key" if group else None,
+                             credential_group=group, simulated=engine.mode == "simulation"))
+    if s.auth:
+        for c in engine.creds._creds:                     # fresh state for this run's test keys
+            if c.group == group:
+                c.state, c.cooldown_until = "unverified", 0.0
+                c.failover_on = ["rate_limited", "credential_expired"] if heal else []   # baseline: no failover
+    target.install(name, s, "v2", keys if s.auth else None)
+    return name, group
+
+
+def install(engine, s: Scenario, run_id: str, mode: str, target=None) -> str:
+    """Prepare a scenario without calling it (tests use this to drive the tool themselves)."""
+    return _prepare(engine, s, run_id, mode, _target_for(engine, target))[0]
+
+
+def run(engine, scenario_id: str, seed: int = 7, heal: bool = True, target=None, evidence: bool = True,
+        evidence_run: str | None = None) -> dict:
+    """Run one scenario. Deterministic for a given seed (ids are derived from it)."""
+    target = _target_for(engine, target)
+    s = BY_ID[scenario_id]
+    rnd = random.Random(f"{scenario_id}:{seed}:{heal}:{engine.storage.environment}")
+    run_id = f"{seed}-{rnd.randrange(16 ** 6):06x}"
+    if isinstance(target, ServiceTarget):            # real server state persists: unique per execution
+        run_id += "-" + __import__("uuid").uuid4().hex[:4]
+    mode = "adaptix" if heal else "baseline"
+    name, group = _prepare(engine, s, run_id, mode, target, heal)
+    res = engine.execute(name, dict(s.args), scenario=s.id, heal=heal)
+    if s.auth:
         for c in engine.creds._creds:
             if c.group == group:
-                c.failover_on = []
-    auth = {"header": "x-api-key", "valid": [b], "expired": [a]} if s.auth == "expired_primary" else \
-        {"header": "x-api-key", "valid": []}
-    engine.upstreams.set_simulated(name, make_app(s.path, s.v2, title=s.title, auth=auth))
-    res = engine.execute(name, dict(s.args), scenario=s.id, heal=heal)
-    for c in engine.creds._creds:
-        if c.group == group:
-            c.failover_on = ["rate_limited", "credential_expired"]
-    return _summarize(s, mode, res, engine.upstreams.sim_app(name), expected_outcome(s, engine, heal), engine)
+                c.failover_on = ["rate_limited", "credential_expired"]
+    out = _summarize(s, mode, res, target.stats(name), expected_outcome(s, engine, heal), engine,
+                     target.environment)
+    out["tool"] = name
+    if evidence:
+        from . import evidence as evidence_mod
+        inc = engine.storage.incident(res["incident"]) if res.get("incident") else None
+        ev = evidence_mod.build(engine, inc.model_dump(mode="json") if inc else None,
+                                run_id=evidence_run or f"{target.environment.lower()}-{run_id}", scenario=s.id,
+                                tool=name, expected=out["expected"], expected_category=s.expect_category,
+                                result=res, extra={"mode": mode})
+        out["evidence_id"] = ev["evidence_id"]
+    return out
 
 
 def expected_outcome(s: Scenario, engine, heal: bool = True) -> str:
@@ -218,18 +285,21 @@ def llm_label(llm_meta: dict | None) -> dict:
     real = bool(llm_meta.get("real"))
     kind = "REAL Gemini request" if real and llm_meta.get("provider") == "gemini" else \
         ("real provider request" if real else "MOCK (not a real model)" if "mock" in str(llm_meta.get("provider"))
-         else "no request sent")
+         else "not a real request (test double)")
     return {"used": True, "label": kind, "real": real, "provider": llm_meta.get("provider"),
             "model": llm_meta.get("model"), "ok": llm_meta.get("ok"), "error_category": llm_meta.get("error_category"),
             "prompt_tokens": llm_meta.get("prompt_tokens"), "output_tokens": llm_meta.get("output_tokens")}
 
 
-def _summarize(s: Scenario, mode: str, res: dict, app, expected: str, engine=None) -> dict:
+def _summarize(s: Scenario, mode: str, res: dict, stats: dict | None, expected: str, engine=None,
+               environment: str = "SIMULATION") -> dict:
     outcome = "recovered" if res["status"] in ("ok", "recovered") else res["status"]
     inc = engine.storage.incident(res["incident"]) if engine is not None and res.get("incident") else None
-    return {"scenario": s.id, "title": s.title, "mode": mode, "simulated": True, "expected": expected,
+    stats = stats or {}
+    return {"scenario": s.id, "title": s.title, "mode": mode, "simulated": environment == "SIMULATION",
+            "environment": environment, "expected": expected, "expected_category": s.expect_category,
             "llm": llm_label(inc.llm if inc else None), "llm_planner": getattr(engine.llm, "name", "none") if engine else None,
             "outcome": outcome, "matches_expectation": outcome == expected, "category": res.get("category"),
             "incident": res.get("incident"), "reason": res.get("reason"), "duration_ms": res.get("duration_ms"),
-            "tool_version": res.get("tool_version"), "upstream_calls": getattr(app.state, "calls", None),
-            "side_effects": getattr(app.state, "effects", None)}
+            "tool_version": res.get("tool_version"), "upstream_calls": stats.get("calls"),
+            "side_effects": stats.get("effects")}
