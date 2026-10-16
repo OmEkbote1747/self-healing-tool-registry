@@ -54,6 +54,8 @@ class ToolDef:
     def build(self, args: dict, config: dict) -> tuple[dict, dict]:
         body: dict = {}
         for target, (src, conv) in self.body_map.items():
+            if src not in args:            # optional argument the agent did not send
+                continue
             value = args[src] if conv is None else convert(args[src], conv)
             _set(body, target, value)
         headers = {h: config[k] for h, k in self.header_map.items()}
@@ -63,6 +65,8 @@ class ToolDef:
         body, headers = self.build(args, config)
         query, path_params = {}, {}
         for loc, (src, conv) in self.param_map.items():
+            if src not in args:
+                continue
             where, name = loc.split(":", 1)
             value = args[src] if conv is None else convert(args[src], conv)
             (query if where == "query" else path_params)[name] = value
@@ -402,7 +406,8 @@ class SelfHealer:
         fields = op.fields
 
         # 2. what changed (every field is keyed by location: body:..., query:..., path:...)
-        current = {"body:" + t: v for t, v in td.body_map.items()} | dict(td.param_map)
+        current = {loc: v for loc, v in ({"body:" + t: v for t, v in td.body_map.items()}
+                                         | dict(td.param_map)).items() if v[0] in args}
         kept = {loc: v for loc, v in current.items() if loc in fields}
         unfilled = [loc for loc, f in fields.items() if f.required and loc not in kept]
         optional = [loc for loc, f in fields.items() if not f.required and loc not in kept]

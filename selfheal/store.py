@@ -39,6 +39,9 @@ CREATE TABLE IF NOT EXISTS proposals (
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT, tenant TEXT NOT NULL, ts TEXT NOT NULL, kind TEXT NOT NULL,
   tool TEXT, data TEXT);
+CREATE TABLE IF NOT EXISTS policies (
+  tenant TEXT NOT NULL, tool TEXT NOT NULL, overrides TEXT NOT NULL, updated_at TEXT NOT NULL,
+  PRIMARY KEY (tenant, tool));
 CREATE INDEX IF NOT EXISTS ix_versions ON versions (tenant, tool, version);
 CREATE INDEX IF NOT EXISTS ix_proposals ON proposals (tenant, status);
 """
@@ -68,6 +71,10 @@ class SqliteRegistry:
         self._lock = threading.Lock()
         with self._tx(write=False) as c:     # executescript manages its own transaction
             c.executescript(SCHEMA)
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(tools)")}
+            for col in ("base_url", "description", "arg_schema", "method"):     # forward-only migration
+                if col not in cols:
+                    c.execute(f"ALTER TABLE tools ADD COLUMN {col} TEXT")
 
     # -- plumbing
     @contextmanager
@@ -93,12 +100,15 @@ class SqliteRegistry:
                   (self.tenant, _now(), kind, tool, json.dumps(data)))
 
     # -- tools and versions
-    def register(self, name: str, path: str, schema: dict[str, str], method: str = "POST"):
+    def register(self, name: str, path: str, schema: dict[str, str], method: str = "POST",
+                 base_url: str | None = None, description: str | None = None):
         td = initial_tooldef(name, path, schema, method)
         with self._tx() as c:
             c.execute("DELETE FROM versions WHERE tenant=? AND tool=?", (self.tenant, name))
             c.execute("DELETE FROM proposals WHERE tenant=? AND tool=?", (self.tenant, name))
-            c.execute("INSERT OR REPLACE INTO tools VALUES (?,?,?,?)", (self.tenant, name, path, _now()))
+            c.execute("INSERT OR REPLACE INTO tools (tenant, name, path, created_at, base_url, description, "
+                      "arg_schema, method) VALUES (?,?,?,?,?,?,?,?)",
+                      (self.tenant, name, path, _now(), base_url, description, json.dumps(schema), method.upper()))
             c.execute("INSERT INTO versions VALUES (?,?,?,?,?,?,?,?,?)",
                       (self.tenant, name, 1, _td_to_json(td), "active", "initial", None, 0, _now()))
             self._event(c, "registered", name, {"version": 1})
@@ -227,3 +237,24 @@ class SqliteRegistry:
             rows = c.execute("SELECT ts, kind, tool, data FROM events WHERE tenant=? ORDER BY id DESC LIMIT ?",
                              (self.tenant, limit)).fetchall()
         return [{"ts": r["ts"], "kind": r["kind"], "tool": r["tool"], **json.loads(r["data"] or "{}")} for r in rows]
+
+    # -- tool metadata and per-tool policy
+    def tools(self) -> list[dict]:
+        with self._tx(write=False) as c:
+            rows = c.execute("SELECT * FROM tools WHERE tenant=? ORDER BY name", (self.tenant,)).fetchall()
+        return [{"name": r["name"], "path": r["path"], "method": r["method"] or "POST", "base_url": r["base_url"],
+                 "description": r["description"] or "", "arg_schema": json.loads(r["arg_schema"] or "{}")}
+                for r in rows]
+
+    def tool(self, name: str) -> dict | None:
+        return next((t for t in self.tools() if t["name"] == name), None)
+
+    def policies(self) -> dict[str, dict]:
+        with self._tx(write=False) as c:
+            rows = c.execute("SELECT tool, overrides FROM policies WHERE tenant=?", (self.tenant,)).fetchall()
+        return {r["tool"]: json.loads(r["overrides"]) for r in rows}
+
+    def set_policy(self, tool: str, overrides: dict):
+        with self._tx() as c:
+            c.execute("INSERT OR REPLACE INTO policies VALUES (?,?,?,?)", (self.tenant, tool, json.dumps(overrides), _now()))
+            self._event(c, "policy_set", tool, {"overrides": overrides})

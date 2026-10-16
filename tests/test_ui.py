@@ -2,7 +2,7 @@
 import pytest
 from streamlit.testing.v1 import AppTest
 
-PAGES = ["home", "how", "demo", "bench", "stress", "registry"]
+PAGES = ["home", "how", "api", "demo", "bench", "stress", "registry"]
 
 
 @pytest.mark.parametrize("page", PAGES)
