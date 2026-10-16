@@ -89,7 +89,9 @@ def rows_from_incident(inc: dict, environment: str) -> list[dict]:
             "change_id": f"{inc['id']}#{i + 1}", "incident_id": inc["id"], "check_id": None,
             "tool": inc["tool"], "environment": environment, "environment_label": ENV_LABEL[environment],
             "field_path": c["location"], "change_kind": c["kind"], "change_type": change_label(c, amb),
-            "previous": c.get("old"), "new": c.get("new"), "change_detail": c.get("detail") or None,
+            "previous": c.get("old"),
+            "new": (f"{c['location']} ({c['new']})" if c["kind"] in ("renamed", "moved") and c.get("new") else c.get("new")),
+            "change_detail": c.get("detail") or None,
             "repair_status": repair, "verification": verification, "timestamp": inc.get("started_at"),
             "incident_status": inc.get("status"), "scenario": inc.get("scenario"),
             "details": {

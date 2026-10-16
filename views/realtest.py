@@ -36,6 +36,7 @@ def _demo(status: dict):
                  help="Starts the test service if needed and sends one minimal real Gemini request"):
         with st.spinner("Checking…"):
             st.session_state["rt_preflight"] = safe_call(api, "POST", "/api/test/preflight")
+        st.rerun()                                  # redraw the status lines with the new state
     run = c2.button("Run the recovery demo", type="primary", icon=":material/play_arrow:",
                     disabled=not status["gemini_configured"])
     fail = c3.button("Run the failure demo", icon=":material/undo:", disabled=not status["gemini_configured"],
@@ -49,6 +50,7 @@ def _demo(status: dict):
         with st.spinner("Running against the real test service and Gemini…"):
             st.session_state["rt_demo"] = safe_call(api, "POST", "/api/test/demo",
                                                     json={"fault": "drop_writes" if fail else None})
+        st.rerun()
     res = st.session_state.get("rt_demo")
     if res:
         with st.container(border=True):
@@ -82,6 +84,7 @@ def _matrix(status: dict):
         with st.spinner(f"Running {len(pick) * runs} real HTTP scenario run(s)…"):
             st.session_state["rt_matrix"] = safe_call(api, "POST", "/api/test/matrix",
                                                       json={"scenarios": pick, "runs": int(runs), "llm": llm})
+        st.rerun()
     m = st.session_state.get("rt_matrix")
     if not m:
         return
