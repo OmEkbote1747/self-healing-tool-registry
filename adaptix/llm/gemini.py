@@ -24,6 +24,31 @@ from . import SYSTEM_INSTRUCTION, LLMResult, build_prompt
 PERMANENT = {"credential_invalid", "credential_expired", "permission_denied", "model_not_found", "bad_request",
              "refused", "credential_unavailable", "not_permitted", "missing_configuration"}
 
+# Keep the provider-side schema small and within Gemini's structured-output
+# subset. The complete LLMRepairPlan contract is still enforced by Pydantic
+# after the response is returned.
+GEMINI_PLAN_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["diagnosis", "evidence", "mappings", "confidence"],
+    "properties": {
+        "diagnosis": {"type": "string"},
+        "evidence": {"type": "array", "items": {"type": "string"}},
+        "mappings": {"type": "array", "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["target_field", "source_arg", "transform", "evidence"],
+            "properties": {
+                "target_field": {"type": "string"},
+                "source_arg": {"type": "string"},
+                "transform": {"type": "string", "enum": ["none", "to_int", "to_float", "to_str", "to_bool", "iso_date"]},
+                "evidence": {"type": "string"},
+            },
+        }},
+        "confidence": {"type": "number"},
+    },
+}
+
 
 def classify_gemini_error(exc) -> str:
     from google.genai import errors
@@ -92,7 +117,7 @@ class GeminiProvider:
         from google.genai import types
         kw = dict(system_instruction=SYSTEM_INSTRUCTION, temperature=0.0, max_output_tokens=max_tokens)
         if json_output:
-            kw.update(response_mime_type="application/json", response_json_schema=LLMRepairPlan.model_json_schema())
+            kw.update(response_mime_type="application/json", response_json_schema=GEMINI_PLAN_SCHEMA)
         return types.GenerateContentConfig(**kw)
 
     def _request(self, contents: str, json_output: bool, max_tokens: int) -> LLMResult:
