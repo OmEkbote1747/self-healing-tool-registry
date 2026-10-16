@@ -2,9 +2,9 @@ import streamlit as st
 from fastapi.testclient import TestClient
 
 from selfheal.cases import APPROVED_CONFIG, DEMO_CASE, build_cases, build_stress_cases
-from selfheal.healer import ConflictError, NaiveRetryAgent, SelfHealer, ToolRegistry
+from selfheal.healer import ConflictError, NaiveRetryAgent, SelfHealer
 from selfheal.mock_api import make_app
-from views.common import LOG, footer, page_header, show_trace, use_llm
+from views.common import LOG, footer, page_header, session_registry, show_trace, use_llm
 
 
 def _healer(registry):
@@ -52,7 +52,7 @@ def render():
 
     if run:
         client = TestClient(make_app(case.path, case.v2, case.v2_headers))
-        registry = ToolRegistry()
+        registry = session_registry()        # durable, tenant-scoped (SQLite)
         registry.register(case.tool, case.path, case.v1)
         base = NaiveRetryAgent().call(client, registry.current(case.tool), case.args)
         healer = _healer(registry)

@@ -21,9 +21,23 @@ def test_policy_assess(src, dst, score, expected):
     assert RepairPolicy().assess(src, dst, score)[0] == expected
 
 
+@pytest.fixture(params=["memory", "sqlite"], autouse=True)
+def registry_kind(request, tmp_path):
+    global _KIND, _DB
+    _KIND, _DB = request.param, tmp_path / "reg.db"
+    yield request.param
+
+
+def _new_registry():
+    if _KIND == "sqlite":
+        from selfheal.store import SqliteRegistry
+        return SqliteRegistry(_DB, tenant="t1")
+    return ToolRegistry()
+
+
 def _setup(case=DEMO_CASE, policies=None):
     client = TestClient(make_app(case.path, case.v2, case.v2_headers))
-    reg = ToolRegistry()
+    reg = _new_registry()
     reg.register(case.tool, case.path, case.v1)
     return client, reg, SelfHealer(reg, APPROVED_CONFIG, use_llm=False, policies=policies)
 
@@ -82,10 +96,11 @@ def test_failing_canary_is_rolled_back():
     case = next(c for c in build_cases() if c.note == "user_id -> userId")
     client, reg, healer = _setup(case)
     healer.call(client, case.tool, case.args, agent_id="agent-A")
-    canary = reg.current(case.tool, "agent-A")
+    canary_version = reg.current(case.tool, "agent-A").version
     other = TestClient(make_app(case.path, {"user_identifier_v3": "str", "email": "str"}, []))
     healer.call(other, case.tool, case.args, agent_id="agent-A")
-    assert canary.status == "rolled_back"
+    status = {v.version: v.status for v in reg.versions[case.tool]}
+    assert status[canary_version] == "rolled_back"
 
 
 def test_benchmark_has_no_false_repairs():

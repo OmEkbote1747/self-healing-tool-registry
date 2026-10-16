@@ -43,15 +43,19 @@ def render():
             cols = st.columns(min(len(versions), 4))
             for col, v in zip(cols * 10, versions):
                 with col:
-                    current = v is registry.current(name)
+                    current = v.version == registry.current(name).version
                     st.markdown(f"**v{v.version}** · {v.status}" + (" · *current*" if current else ""))
                     st.json(v.describe())
             live = [v for v in versions if v.status in ("active", "canary")]
             if len(live) > 1 and st.button(f"Roll back {name} to v{live[-2].version}", icon=":material/undo:"):
                 registry.rollback(name)
                 st.rerun()
+    if hasattr(registry, "events"):
+        st.subheader("Registry events (durable, this session's tenant only)")
+        st.caption(f"Tenant `{registry.tenant}` · stored in SQLite with atomic, versioned writes")
+        st.dataframe(registry.events(50), hide_index=True, use_container_width=True)
     if LOG.exists():
         lines = LOG.read_text().strip().splitlines()[-20:]
-        st.subheader(f"Audit log · last {len(lines)} entries")
-        st.code("\n".join(lines), language="json")
+        with st.expander(f"Patch audit log (JSONL) · last {len(lines)} entries", icon=":material/receipt_long:"):
+            st.code("\n".join(lines), language="json")
     footer()

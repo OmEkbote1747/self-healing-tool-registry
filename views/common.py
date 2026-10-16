@@ -5,6 +5,15 @@ import streamlit as st
 
 ROOT = Path(__file__).resolve().parent.parent
 LOG = ROOT / "logs" / "patches.jsonl"
+DB = ROOT / "logs" / "registry.db"
+
+
+def session_registry():
+    """A durable registry scoped to this browser session (its own tenant), so visitors never see each other."""
+    import uuid
+    from selfheal.store import SqliteRegistry
+    tenant = st.session_state.setdefault("tenant", "session-" + uuid.uuid4().hex[:8])
+    return SqliteRegistry(DB, tenant=tenant)
 APP_NAME = "SchemaHeal"
 REPO_URL = "https://github.com/Paras131206/self-healing-tool-registry"
 
