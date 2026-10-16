@@ -1,9 +1,9 @@
-"""Real API Monitoring: register genuine HTTPS APIs, check their live schema, see drift and repairs."""
+"""API Registry: register genuine HTTPS APIs, check their live schema, see drift, repairs and versions."""
 import json
 
 import streamlit as st
 
-from views.common import REAL_BADGE, api, badge, empty, fmt_ms, go, header, safe_call
+from views.common import REAL_BADGE, api, badge, empty, fmt_ms, go, header, mutated, safe_call
 
 PETSTORE = {"name": "petstore_find_by_status", "provider": "Swagger Petstore (public demo API, swagger.io)",
             "base_url": "https://petstore3.swagger.io/api/v3", "path": "/pet/findByStatus", "method": "GET",
@@ -61,6 +61,7 @@ def _register_form(allowed: list[str]):
                     return
                 res = safe_call(api, "POST", "/api/tools", json=body)
                 if res:
+                    mutated()
                     st.session_state.pop("mon_prefill", None)
                     st.success(f"Registered {res['name']} (schema {res['schema_signature']}, source {res['schema_source']})")
                     st.rerun()
@@ -87,6 +88,7 @@ def _tool_card(t: dict):
             with st.spinner("Contacting the provider…"):
                 res = safe_call(api, "POST", f"/api/monitor/{t['tool']}/check")
             if res:
+                mutated()
                 st.rerun()
         if c is None:
             st.info("Not checked yet. Use **Check now**.", icon=":material/schedule:")
@@ -115,8 +117,11 @@ def _tool_card(t: dict):
             if c.get("repair"):
                 st.success(f"Autonomous repair: {c['repair']['reason']}", icon=":material/healing:")
             if c.get("incident") and st.button("Open incident timeline", key=f"inc-{t['tool']}-{c['ts']}"):
-                go("recovery", incident_id=c["incident"])
-        with st.expander("Schedule and history"):
+                go("recovery", incident_id=c["incident"], env_choice="REAL API")
+        with st.expander("Versions, rollback and delete"):
+            from views.tools import versions_panel
+            versions_panel("/api", t["tool"], t["current_version"])
+        with st.expander("Check schedule and history"):
             s1, s2, s3 = st.columns([1, 1, 1])
             enabled = s1.toggle("Scheduled checks", t["monitor_enabled"], key=f"en-{t['tool']}")
             minutes = s2.number_input("Every (minutes)", 5, 7 * 24 * 60, t["interval_s"] // 60, step=5, key=f"iv-{t['tool']}")
@@ -132,7 +137,7 @@ def _tool_card(t: dict):
 
 
 def render():
-    header("Real API Monitoring", "Live schemas of genuine external APIs",
+    header("API Registry", "Your real APIs and their live schemas",
            "Registered tools call real HTTPS providers through the SSRF guard. ADAPTIX reads each provider's "
            "authoritative schema on a schedule or on demand, compares it with the saved version and, when drift "
            "is confirmed on a real call, repairs, verifies and rolls back autonomously. No simulated data appears here.")

@@ -168,3 +168,36 @@ def empty(msg: str, action_label: str | None = None, page_key: str | None = None
     st.info(msg, icon=":material/info:")
     if action_label and page_key and st.button(action_label, key=f"empty-{page_key}-{action_label}"):
         go(page_key)
+
+
+# keys holding results derived from server data; cleared after any confirmed mutation so no page shows stale copies
+DERIVED_KEYS = ("chaos_last", "chaos_all", "rt_matrix", "rt_demo", "rt_preflight", "demo_job", "eval", "mon_prefill",
+                "llm_check", "ev_pick")
+
+
+def mutated(*keep: str):
+    """Call after a confirmed change (repair, rollback, reset, registration, demo run). Every page re-reads the API on
+    its next render, so dropping derived copies is enough to keep all views consistent."""
+    for k in DERIVED_KEYS:
+        if k not in keep:
+            st.session_state.pop(k, None)
+    st.cache_data.clear()
+
+
+ENV_PREFIX = {"REAL API": "/api", "REAL API TEST": "/api/test", "SIMULATION": "/api/sim"}
+ENV_NOTE = {"REAL API": "real external providers (production records)",
+            "REAL API TEST": "controlled test service run by ADAPTIX (real HTTP on 127.0.0.1)",
+            "SIMULATION": "in-process simulated APIs (no network)"}
+
+
+def env_picker(key: str, label: str = "Environment") -> str:
+    """One shared environment selector; the choice is remembered across pages (same session key)."""
+    options = list(ENV_PREFIX)
+    cur = st.session_state.get("env_choice", "REAL API")
+    env = st.radio(label, options, index=options.index(cur) if cur in options else 0, horizontal=True, key=key,
+                   help="REAL API: your registered providers · REAL API TEST: the controlled demo service · "
+                        "SIMULATION: in-process simulated APIs")
+    st.session_state["env_choice"] = env
+    if env != "REAL API":
+        st.caption(f"{env}: {ENV_NOTE[env]}. Not production data.")
+    return env

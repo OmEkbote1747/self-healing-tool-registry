@@ -83,7 +83,8 @@ def phase_strip(inc: dict):
 def render(prefix: str | None = None):
     switchable = prefix is None
     if switchable:
-        env = st.radio("Environment", list(ENV_PREFIX), horizontal=True, key="rc_env")
+        from views.common import env_picker
+        env = env_picker("rc_env")
         prefix = ENV_PREFIX[env]
     sim = prefix == "/api/sim"
     title = {"/api": "Recovery Center", "/api/test": "Real API Test Records", "/api/sim": "Simulation Records"}[prefix]

@@ -16,6 +16,7 @@ Nothing falls back to a mock. If the service or Gemini is unavailable, the run s
 """
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 
@@ -50,9 +51,15 @@ class RealTestError(RuntimeError):
     pass
 
 
+_ON_STEP = threading.local()
+
+
 def _step(steps: list, name: str, status: str, title: str, detail=None):
     steps.append({"step": len(steps) + 1, "name": name, "status": status, "title": title, "ts": now_iso(),
                   "detail": detail})
+    cb = getattr(_ON_STEP, "cb", None)
+    if cb:
+        cb()
 
 
 def preflight(state, check_llm: bool = True) -> dict:
@@ -93,11 +100,19 @@ def _read_back(engine, base: str, order_id: str | None, expect: dict) -> dict:
             else "stored order does not match the request"}
 
 
-def run_orders_demo(state, fault: str | None = None) -> dict:
+def run_orders_demo(state, fault: str | None = None, steps: list | None = None, observer=None, on_step=None) -> dict:
+    """steps/observer/on_step: optional live-progress hooks used by the manual demo (adaptix.demo)."""
+    _ON_STEP.cb = on_step
+    try:
+        return _orders_demo(state, fault, [] if steps is None else steps, observer)
+    finally:
+        _ON_STEP.cb = None
+
+
+def _orders_demo(state, fault: str | None, steps: list, observer) -> dict:
     """fault=None: the success path. fault="drop_writes": v2 accepts orders but does not store them, so the
     independent read-back fails and the repair must be rolled back."""
     run_id = "run_" + uuid.uuid4().hex[:10]
-    steps: list = []
     t_run = time.perf_counter()
     pf = preflight(state)
     _step(steps, "preflight", "ok" if pf["service"]["status"] == "VERIFIED" and pf["gemini"]["status"] == "VERIFIED"
@@ -147,7 +162,8 @@ def run_orders_demo(state, fault: str | None = None) -> dict:
         eng.set_llm(state.llm)
         eng.llm_required = True
         try:
-            res = eng.execute(name, dict(DEMO_ARGS), scenario="orders-demo" + (f":{fault}" if fault else ""))
+            res = eng.execute(name, dict(DEMO_ARGS), scenario="orders-demo" + (f":{fault}" if fault else ""),
+                              observer=observer)
         finally:
             eng.llm_required = False
         inc = eng.storage.incident(res["incident"]) if res.get("incident") else None

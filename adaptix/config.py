@@ -37,7 +37,6 @@ class Settings:
     db_path: str = "data/adaptix.db"             # production (real APIs) records
     sim_db_path: str = "data/adaptix-sim.db"     # Simulation Lab records: a separate database file
     test_db_path: str = "data/adaptix-test.db"   # REAL_API_TEST (controlled test service) records
-    livedb_db_path: str = "data/adaptix-livedb.db"   # LIVE_DB_DEMO (PostgreSQL demo target) records
     # LLM
     llm_provider: str = "gemini"                 # gemini | mock | none
     gemini_model: str = "gemini-3.5-flash-lite"  # Google's recommended fast/cost-efficient model (docs, 2026-10)
@@ -85,7 +84,6 @@ def get_settings() -> Settings:
         db_path=env("ADAPTIX_DB_PATH", "data/adaptix.db"),
         sim_db_path=env("ADAPTIX_SIM_DB_PATH", "data/adaptix-sim.db"),
         test_db_path=env("ADAPTIX_TEST_DB_PATH", "data/adaptix-test.db"),
-        livedb_db_path=env("ADAPTIX_LIVEDB_DB_PATH", "data/adaptix-livedb.db"),
         llm_provider=(env("LLM_PROVIDER", "gemini") or "gemini").lower(),
         gemini_model=env("GEMINI_MODEL", "gemini-3.5-flash-lite"),
         llm_timeout_s=_float("LLM_TIMEOUT_SECONDS", 20.0),

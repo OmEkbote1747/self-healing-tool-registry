@@ -303,12 +303,14 @@ class Engine:
 
     # ================================================================ public entry points
     def execute(self, tool: str, args: dict, correlation_id: str | None = None, scenario: str | None = None,
-                heal: bool = True) -> dict:
+                heal: bool = True, observer=None) -> dict:
+        """observer(step): optional callback receiving each timeline step as it happens (live progress)."""
         spec = self.storage.tool(tool)
         if spec is None:
             raise EngineError(f"unknown tool {tool}")
         inc = Incident(tool=tool, simulated=spec.simulated, scenario=scenario, healing=heal,
                        environment=self.storage.environment, correlation_id=correlation_id or uuid.uuid4().hex)
+        inc._observer = observer
         t0, deadline = time.perf_counter(), time.monotonic() + self.s.total_time_budget_s
         td = self.storage.current(tool)
         inc.from_version = td.version
