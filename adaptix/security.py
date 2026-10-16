@@ -20,6 +20,25 @@ SENSITIVE = re.compile(r"(auth|api[-_]?key|token|secret|password|passwd|cookie|s
 SAFE_HEADERS = {"content-type", "accept", "x-client-version", "idempotency-key"}
 
 
+_KNOWN_SECRETS: set[str] = set()
+
+
+def register_secret(value: str):
+    """Every configured secret value is scrubbed from all text that passes through redact()/scrub()."""
+    if value and len(value) >= 6:
+        _KNOWN_SECRETS.add(value)
+
+
+def scrub(text: str) -> str:
+    """Remove any known secret value (and anything that looks like a bearer token) from free text."""
+    if not isinstance(text, str):
+        return text
+    for s in sorted(_KNOWN_SECRETS, key=len, reverse=True):
+        if s in text:
+            text = text.replace(s, MASK)
+    return re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}", r"\1" + MASK, text)
+
+
 def _shape(v) -> str:
     return f"<{type(v).__name__}>"
 
@@ -30,8 +49,10 @@ def redact(obj, key: str | None = None):
         return MASK
     if isinstance(obj, dict):
         return {k: redact(v, k) for k, v in obj.items()}
-    if isinstance(obj, list):
+    if isinstance(obj, (list, tuple)):
         return [redact(v) for v in obj]
+    if isinstance(obj, str):
+        return scrub(obj)
     return obj
 
 
