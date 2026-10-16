@@ -7,7 +7,7 @@ import streamlit as st
 from views.common import api, header, kpis, safe_call
 
 ENVS = {"REAL_API_TEST": ("/api/test", "REAL API TEST"), "LIVE_API": ("/api", "REAL API"),
-        "SIMULATION": ("/api/sim", "SIMULATION")}
+        "SIMULATION": ("/api/sim", "SIMULATION"), "LIVE_DB_DEMO": ("/api/livedb", "LIVE DB DEMO")}
 
 
 def _pct(v, d):

@@ -1,4 +1,9 @@
+import os
+
 import pytest
+
+# Tests read configuration only from environment variables, never from a local .streamlit/secrets.toml
+os.environ["ADAPTIX_IGNORE_STREAMLIT_SECRETS"] = "1"
 
 from adaptix.config import Settings
 from adaptix.credentials import CredentialRegistry

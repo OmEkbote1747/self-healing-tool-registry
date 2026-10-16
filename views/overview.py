@@ -23,9 +23,9 @@ def render():
 
     ov = safe_call(api, "GET", "/api/overview") or {}
     st.subheader("Across environments (persisted records)")
-    cols = st.columns(3)
-    for col, (env, label) in zip(cols, (("LIVE_API", "REAL API"), ("REAL_API_TEST", "REAL API TEST"),
-                                        ("SIMULATION", "SIMULATION"))):
+    cols = st.columns(4)
+    for col, (env, label) in zip(cols, (("LIVE_API", "REAL API"), ("LIVE_DB_DEMO", "LIVE DB DEMO"),
+                                        ("REAL_API_TEST", "REAL API TEST"), ("SIMULATION", "SIMULATION"))):
         o = ov.get(env)
         if not o:
             continue
