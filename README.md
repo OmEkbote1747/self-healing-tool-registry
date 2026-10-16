@@ -124,6 +124,13 @@ Rules:
 
 The **REAL_API_TEST** environment uses a small versioned API that ADAPTIX itself controls. It is served by a real HTTP server (uvicorn on a loopback TCP socket) with an authoritative OpenAPI document. No third-party API is modified. The guard exempts only that server's exact address; any other loopback port, private address or `sim://` URL is still refused. Records go to their own database (`ADAPTIX_TEST_DB_PATH`).
 
+The app starts this service itself, on `127.0.0.1` with a port the OS picks at start-up. That address only exists inside the app's server: on Streamlit Cloud it is the cloud container, so it cannot be opened from your computer. To run the service on its own, locally, with a fixed port:
+
+```bash
+python -m adaptix.testservice --port 8765
+curl http://127.0.0.1:8765/orders-api/health
+```
+
 **End-to-end demonstration** (Real API Test page, or `POST /api/test/demo`). The schema change: `customer_id` becomes `client_id`.
 
 1. **Preflight.** The test service answers over HTTP, and Gemini answers a real minimal request. If either fails, the run stops with an actionable error and nothing falls back.

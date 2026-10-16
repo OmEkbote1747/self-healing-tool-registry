@@ -115,6 +115,9 @@ def render():
                 + (f"`{status['service_url']}` · schema {status['service_state']['version']} · "
                    f"{status['service_state']['orders_stored']} orders stored" if status["service_running"]
                    else "starts on first use"), unsafe_allow_html=True)
+    if status["service_running"]:
+        s1.caption("This address is inside the app's own server, with a port chosen at start-up. It is not reachable "
+                   "from your browser or computer. To run the service locally: python -m adaptix.testservice --port 8765")
     s2.markdown(f"**Gemini** {badge('CONFIGURED' if status['gemini_configured'] else 'ACTION REQUIRED')} "
                 f"`{status['gemini_model']}`", unsafe_allow_html=True)
     t1, t2 = st.tabs(["End-to-end demo", "Scenario matrix"])

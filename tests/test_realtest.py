@@ -207,3 +207,18 @@ def test_api_routes_and_exports_are_separated_and_redacted(client, state):
         assert KEY not in blob and state.test_service.admin_token not in blob
     ov = client.get("/api/overview").json()
     assert ov["REAL_API_TEST"]["evidence_records"] >= 1 and ov["LIVE_API"]["incidents"] == 0
+
+
+def test_standalone_service_on_a_fixed_port_answers_health():
+    import socket
+    from adaptix.testservice import TestService
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    svc = TestService().start(port=port)
+    try:
+        r = httpx.get(f"http://127.0.0.1:{port}/orders-api/health")
+        assert svc.port == port and r.status_code == 200 and r.json() == {"status": "ok", "schema_version": "v1"}
+    finally:
+        svc.stop()

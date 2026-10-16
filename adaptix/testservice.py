@@ -174,14 +174,15 @@ class TestService:
     def address(self) -> tuple[str, int]:
         return ("127.0.0.1", self.port)
 
-    def start(self, timeout: float = 10.0) -> "TestService":
+    def start(self, timeout: float = 10.0, port: int = 0) -> "TestService":
+        """port=0 (default, used inside ADAPTIX): the OS picks a free port. A fixed port is for standalone use."""
         if self._thread and self._thread.is_alive():
             return self
         import uvicorn
         from .models import now_iso
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("127.0.0.1", 0))
+        sock.bind(("127.0.0.1", port))
         self.port = sock.getsockname()[1]
         config = uvicorn.Config(self, log_level="warning", lifespan="on", access_log=False)
         self._server = uvicorn.Server(config)
@@ -219,3 +220,20 @@ class TestService:
 
     def stats(self, name: str) -> dict:
         return self.admin("GET", f"/admin/m/{name}")
+
+
+if __name__ == "__main__":       # standalone: python -m adaptix.testservice --port 8765
+    import argparse
+    ap = argparse.ArgumentParser(description="Run the ADAPTIX controlled test service on 127.0.0.1 by itself")
+    ap.add_argument("--port", type=int, default=8765)
+    a = ap.parse_args()
+    svc = TestService().start(port=a.port)
+    print(f"ADAPTIX test service listening on {svc.url}")
+    print(f"  health:  {svc.url}/orders-api/health")
+    print(f"  schema:  {svc.url}/orders-api/openapi.json")
+    print("  admin token (for /admin routes, this process only): " + svc.admin_token, flush=True)
+    try:
+        while svc.running():
+            time.sleep(1)
+    except KeyboardInterrupt:
+        svc.stop()
