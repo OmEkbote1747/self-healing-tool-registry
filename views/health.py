@@ -36,10 +36,14 @@ def render():
             with st.spinner("Calling the provider…"):
                 r = safe_call(api, "POST", "/api/health/llm-check")
             if r:
-                res = r["result"]
-                (st.success if res["ok"] else st.error)(
-                    f"{'Succeeded' if res['ok'] else 'Failed'}: {res.get('error_category') or 'ok'} · "
-                    f"{res.get('duration_ms')} ms · credential {res.get('credential_alias') or '—'}")
+                st.session_state["llm_check"] = r["result"]
+                st.rerun()                      # redraw the status, sidebar and credential states
+        res = st.session_state.get("llm_check")
+        if res:
+            (st.success if res["ok"] else st.error)(
+                f"Last check {res['ts'][11:19]}Z · {'succeeded' if res['ok'] else 'failed'}: "
+                f"{res.get('error_category') or 'ok'} · {res.get('duration_ms')} ms · "
+                f"credential {res.get('credential_alias') or '—'}")
     else:
         st.info("No LLM provider is configured, so no connectivity check is offered. Set GEMINI_API_KEY on the "
                 "server to enable the Gemini tier. Without it, repairs the rules cannot ground stop safely.",
