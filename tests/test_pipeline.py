@@ -158,3 +158,14 @@ def test_repeated_failure_stops_within_budget(engine):
     engine.upstreams.request = flaky
     res = engine.execute(name, dict(s.args))
     assert res["status"] in ("rolled_back", "stopped") and calls["n"] <= 4
+
+
+def test_second_drift_after_a_repair_is_still_diagnosed(engine):
+    """Regression: the repaired version's schema must be stored so a later drift can be diffed."""
+    s = sim.BY_ID["rename-param"]
+    name = sim.install(engine, s, "twice", "adaptix")
+    assert engine.execute(name, dict(s.args))["status"] == "recovered"
+    engine.upstreams.set_simulated(name, make_app(s.path, {"userId": "str", "emailAddress": "str"}))
+    res = engine.execute(name, dict(s.args))
+    assert res["status"] == "recovered" and res["category"] == "schema_drift"
+    assert [v.version for v in engine.storage.versions(name)] == [1, 2, 3]

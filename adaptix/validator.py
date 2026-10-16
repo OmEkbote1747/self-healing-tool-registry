@@ -63,7 +63,8 @@ def validate(plan: RepairPlan, td: ToolDef, spec: ToolSpec, new: Operation, args
         if m.transform not in TRANSFORMS:
             _check(res, "allowlisted transform", False, f"{tag}: {m.transform}")
             continue
-        renamed = leaf(m.target_field).split(".")[-1] != m.source_arg
+        carried_over = (td.request_map.get(m.target_field) or [None])[0] == m.source_arg   # validated before
+        renamed = leaf(m.target_field).split(".")[-1] != m.source_arg and not carried_over
         if renamed:
             units = unit_change(m.source_arg, leaf(m.target_field))
             if units:

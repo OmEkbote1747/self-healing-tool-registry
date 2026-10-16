@@ -398,6 +398,7 @@ class Engine:
                     if sig in seen:
                         return self._stop(inc, "schema_drift", "the same repair was already tried; stopping to avoid a loop")
                     seen.add(sig)
+                    self.storage.save_schema(new)          # the new version's schema must be on record
                     try:
                         candidate = self.storage.apply_repair(candidate, td.version,
                                                               "reuse" if plan.source == "reuse" else "repair",
@@ -473,6 +474,7 @@ class Engine:
         if not vres.accepted:
             return self._stop(inc, "schema_drift", "Response schema changed and no evidence-backed mapping exists; "
                               "the call's outcome must be checked by a person (it was NOT resent)")
+        self.storage.save_schema(new)
         try:
             cand = self.storage.apply_repair(cand, td.version, "repair", inc.id, inc.correlation_id, inc.simulated)
         except ConflictError as e:
