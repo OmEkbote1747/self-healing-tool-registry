@@ -1,12 +1,13 @@
-"""Live Project Integration against a REAL PostgreSQL server (embedded via `pgserver`, no internet needed).
+"""Live Project Integration against a REAL PostgreSQL 16 server (embedded via `pgserver`, no internet needed).
 
-These are real-database tests: DDL, inserts, transactions and catalog reads all run on PostgreSQL 16.
-Repair proposals come from a TEST-ONLY Local Repair Module (tests/local_repair_testmodule.py) because these
-tests must run without a Gemini key; the live Gemini variant runs only with GEMINI_API_KEY (bottom of file).
+DDL, workflows, transactions and catalog reads all run on PostgreSQL. Repair proposals come from a TEST-ONLY
+Local Repair Module (tests/local_repair_testmodule.py) - a unit-test stand-in; the live variant at the bottom
+uses the real configured Gemini when GEMINI_API_KEY is set.
 """
 import json
 import os
 import uuid
+from decimal import Decimal
 
 import pytest
 
@@ -21,6 +22,7 @@ from adaptix.config import Settings  # noqa: E402
 from adaptix.credentials import CredentialRegistry  # noqa: E402
 from adaptix.llm import NoProvider  # noqa: E402
 from adaptix.storage import Storage  # noqa: E402
+from database import build_init_sql, seed_data as sd  # noqa: E402
 
 TOKEN = "livedb-test-token-0000000000000"
 
@@ -41,213 +43,270 @@ def env(pg_uri, tmp_path, monkeypatch):
                creds=CredentialRegistry([], allow_simulated=False), llm=NoProvider(), sleep=lambda s: None,
                start_monitor=False)
     client = TestClient(create_app(st), headers={"Authorization": f"Bearer {TOKEN}"})
-    assert client.post("/api/livedb/setup", json={"reset": True, "confirm": True}).status_code == 200
+    assert client.post("/api/livedb/setup", json={}).status_code == 200
     return client, st, livedb.target_from_env()
 
 
-def experiment(client, engine="local", **args):
-    return client.post("/api/livedb/experiment", json={"engine": engine, **args}).json()
+def experiment(client, scenario, engine="local", confirm=True):
+    return client.post("/api/livedb/experiment", json={"scenario": scenario, "engine": engine, "confirm": confirm})
 
 
-def test_status_never_exposes_the_connection_url(env, pg_uri):
+def q(t, query, *args):
+    with livedb.connect(t) as c:
+        rows = c.execute(psycopg.sql.SQL(query).format(s=psycopg.sql.Identifier(t.schema)), args)
+        out = rows.fetchall() if rows.description else []
+        c.commit()
+        return out
+
+
+# ---------------------------------------------------------------- seed data
+def test_init_sql_is_generated_from_the_seed_module():
+    assert build_init_sql.OUT.read_text() == build_init_sql.build(), "run: python -m database.build_init_sql"
+
+
+def test_seed_counts_foreign_keys_and_totals(env):
+    client, st, t = env
+    s = client.get("/api/livedb/seed-summary").json()
+    assert s["counts"] == {"customers": 20, "products": 15, "orders": 40, "order_items": 79, "inventory_events": 30}
+    assert s["checks"]["orders_with_consistent_totals"] == "40/40"
+    assert q(t, "SELECT count(*) FROM {s}.order_items oi LEFT JOIN {s}.products p USING (product_id) "
+                "WHERE p.product_id IS NULL")[0][0] == 0
+    assert q(t, "SELECT count(*) FROM {s}.orders o LEFT JOIN {s}.customers c USING (customer_id) "
+                "WHERE c.customer_id IS NULL")[0][0] == 0
+    assert all(e.endswith("@example.com") for (e,) in q(t, "SELECT email FROM {s}.customers"))
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):             # FKs are enforced
+        q(t, "INSERT INTO {s}.orders VALUES ('O9999', 'C999', '2026-01-01', 'paid', 1, 'card')")
+    with pytest.raises(psycopg.errors.CheckViolation):                  # CHECK constraints are enforced
+        q(t, "UPDATE {s}.order_items SET line_total = line_total + 1 WHERE item_id = 1")
+    want = sd.expected_order_total("O1012")                             # Python expectations == stored data
+    assert q(t, "SELECT total_amount FROM {s}.orders WHERE order_id='O1012'")[0][0] == Decimal(want["stored_total"])
+
+
+def test_setup_is_idempotent_and_reset_keeps_logs(env):
+    client, st, t = env
+    assert client.post("/api/livedb/setup", json={}).json()["business_tables_loaded"] is False
+    experiment(client, "A")
+    assert client.post("/api/livedb/setup", json={"reset": True}).status_code == 422          # needs confirmation
+    assert client.post("/api/livedb/setup", json={"reset": True, "confirm": True}).status_code == 200
+    assert client.get("/api/livedb/stats").json()["runs"] == 1                                # logs survive a reset
+    assert client.get("/api/livedb/schema").json()["diff"]["changed"] is False
+
+
+@pytest.mark.parametrize("wf", list(dbrepair.WORKFLOWS))
+def test_baseline_workflows_verify_real_business_values(env, wf):
+    client, st, t = env
+    r = client.post(f"/api/livedb/workflows/{wf}/run").json()
+    assert r["ok"] and r["committed"] is False and all(r["verification"]["checks"].values())
+
+
+def test_verification_detects_wrong_business_values(env):
+    """Genuine verification: a query that succeeds but returns wrong data is NOT a success."""
+    client, st, t = env
+    q(t, "UPDATE {s}.orders SET order_status='cancelled' WHERE order_id = "
+         "(SELECT order_id FROM {s}.orders WHERE customer_id='C008' ORDER BY order_date LIMIT 1)")
+    r = client.post("/api/livedb/workflows/customer_orders/run").json()
+    assert r["ok"] is False and r["error"] is None and r["verification"]["ok"] is False
+
+
+# ---------------------------------------------------------------- scenarios A-F
+@pytest.mark.parametrize("scenario,status", [("A", "recovered"), ("B", "recovered"), ("C", "recovered"),
+                                             ("D", "refused"), ("E", "refused"), ("F", "recovered")])
+def test_each_fault_scenario(env, scenario, status):
+    client, st, t = env
+    r = experiment(client, scenario).json()
+    stages = {s["stage"]: s["status"] for s in r["stages"]}
+    assert stages["baseline_test"] == "passed" and stages["fault_injected"] == "applied"
+    assert stages["failure_detected"] == "detected" and r["status"] == status, r["stages"]
+    if status == "recovered":
+        assert r["verified"] and r["recovery_ms"] > 0 and r["patch_diff"].startswith("- ")
+        assert [stages[k] for k in ("validation", "sandbox_test", "patch_applied", "retry", "business_verification")] \
+            == ["validated", "passed", "applied", "retried", "verified"]
+    else:
+        assert stages["validation"] == "refused" and "patch_applied" not in stages and not r["verified"]
+    exp = client.get("/api/livedb/experiments").json()
+    row = next(e for e in exp["experiments"] if e["experiment_id"] == r["experiment_id"])
+    assert row["status"] == status and row["selected_engine"] == "local" and row["injected_fault"] == scenario
+    events = [a["event_type"] for a in exp["audit_log"] if a["experiment_id"] == r["experiment_id"]]
+    assert events[:3] == ["baseline_test", "fault_injected", "failure_detected"]
+
+
+def test_scenario_c_cast_and_inventory_check_rolls_back(env):
+    client, st, t = env
+    r = experiment(client, "C").json()
+    assert "line_total::numeric" in r["patch_diff"]
+    client.post("/api/livedb/setup", json={"reset": True, "confirm": True})
+    before = dict(q(t, "SELECT product_id, stock_quantity FROM {s}.products"))
+    r = client.post("/api/livedb/workflows/inventory_update/run").json()
+    assert r["ok"] and r["committed"] is False
+    assert dict(q(t, "SELECT product_id, stock_quantity FROM {s}.products")) == before      # check run rolled back
+
+
+def test_experiments_require_confirmation_and_a_baseline(env):
+    client, st, t = env
+    assert experiment(client, "A", confirm=False).status_code == 422
+    assert experiment(client, "A").json()["status"] == "recovered"
+    r = experiment(client, "B")                                                # not at baseline any more
+    assert r.status_code == 422 and "reset" in r.json()["detail"]["detail"]
+
+
+def test_failed_verification_rolls_back(env, monkeypatch):
+    client, st, t = env
+    real = dbrepair.verify
+    calls = {"n": 0}
+
+    def flaky(conn, schema, *a, **kw):                     # TEST-ONLY: the final check on the demo target fails
+        v = real(conn, schema, *a, **kw)
+        if schema == t.schema:
+            calls["n"] += 1
+            if calls["n"] >= 2:                            # 1st = baseline; the retry is the next verified target run
+                v = {**v, "ok": False, "summary": "forced mismatch"}
+        return v
+    monkeypatch.setattr(dbrepair, "verify", flaky)
+    r = experiment(client, "A").json()
+    assert r["status"] == "rolled_back" and r["rollback_performed"] and not r["verified"], r["stages"]
+    stages = {s["stage"]: s["status"] for s in r["stages"]}
+    assert stages["business_verification"] == "failed" and stages["rollback"] == "rolled back"
+    assert [x.status for x in st.livedb_storage.versions(dbrepair.tool_name("customer_orders"))] == ["active",
+                                                                                                    "rolled_back"]
+
+
+# ---------------------------------------------------------------- engines
+def test_engine_selection_never_switches_or_fakes(env, monkeypatch):
     client, st, t = env
     s = client.get("/api/livedb/status").json()
-    assert s["configured"] and s["set_up"] and pg_uri not in json.dumps(s)
-    conn = client.post("/api/livedb/test-connection").json()
-    assert conn["ok"] and conn["target"]["schema"] == t.schema and pg_uri not in json.dumps(conn)
-    assert any("SUPERUSER" in w for w in conn["warnings"])       # the embedded server runs as a superuser
+    assert s["engines"]["gemini"]["status"] == "not configured" and s["engines"]["local"]["status"] == "configured"
+    r = experiment(client, "A", engine="gemini").json()                       # no key: stop, do not switch
+    assert r["status"] == "failed" and "engine unavailable" in r["error"]
+    assert {x["stage"]: x["status"] for x in r["stages"]}["proposal"] == "failed"
+    client.post("/api/livedb/setup", json={"reset": True, "confirm": True})
+    monkeypatch.delenv("ADAPTIX_LOCAL_REPAIR_MODULE")
+    s = client.get("/api/livedb/status").json()
+    assert s["engines"]["local"]["status"] == "not configured" and "not configured" in s["engines"]["local"]["detail"]
+    r = experiment(client, "A", engine="local").json()
+    assert r["status"] == "failed" and "not configured" in r["error"]
 
 
-def test_unsafe_schema_names_and_missing_url_are_refused(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@example.invalid/db")
+def test_invalid_engine_output_is_rejected(env, monkeypatch):
+    client, st, t = env
+    import tests.local_repair_testmodule as mod
+    monkeypatch.setattr(mod, "propose", mod.propose_garbage)
+    r = experiment(client, "A").json()
+    stages = {x["stage"]: x for x in r["stages"]}
+    assert r["status"] == "refused" and stages["proposal"]["status"] == "failed"
+    assert stages["validation"]["status"] == "refused"
+
+
+def test_unsafe_proposals_are_refused(env, monkeypatch):
+    client, st, t = env
+    import tests.local_repair_testmodule as mod
+    bad = {"diagnosis": "x", "evidence": [], "affected_fields": [], "response_mappings": [], "compatibility_risks": [],
+           "confidence": 0.99, "verification_steps": [],
+           "mappings": [{"target_field": "body:customers.full_name", "source_arg": "customers.customer_id",
+                         "transform": "none", "evidence": "Stable identifier of the customer (C001..)"}]}
+    monkeypatch.setattr(mod, "propose", lambda ctx: bad)
+    r = experiment(client, "A").json()
+    v = next(x for x in r["stages"] if x["stage"] == "validation")
+    assert r["status"] == "refused" and "catalog identity" in v["title"]
+    m = dbrepair.mapping(st.livedb_storage.current(dbrepair.tool_name("customer_orders")))
+    assert m["customers.customer_id"][1] == "customer_id"                    # nothing applied
+
+
+def test_engine_context_contains_no_row_data(env, monkeypatch):
+    """The context sent to an engine has names, types, comments, the error and the template - never row values."""
+    client, st, t = env
+    seen = {}
+    real = dbrepair.propose
+
+    def spy(state, engine, context):
+        seen["ctx"] = json.dumps(context)
+        return real(state, engine, context)
+    monkeypatch.setattr(dbrepair, "propose", spy)
+    experiment(client, "B")
+    blob = seen["ctx"]
+    for c in sd.customers():
+        assert c["full_name"] not in blob and c["email"] not in blob
+    assert "C008" not in blob and "O10" not in blob
+
+
+# ---------------------------------------------------------------- automatic injection
+def test_schedule_is_off_by_default_needs_confirmation_and_stops(env):
+    client, st, t = env
+    assert client.get("/api/livedb/schedule").json()["enabled"] is False
+    body = {"enabled": True, "interval_s": 60, "max_runs": 2, "engine": "local", "scenarios": ["A", "F"]}
+    assert client.put("/api/livedb/schedule", json=body).status_code == 422          # needs confirmation
+    assert client.put("/api/livedb/schedule", json={**body, "confirm": True}).json()["enabled"] is True
+    sch = st.livedb_scheduler
+    first = sch.tick(now=1_000.0)
+    assert first["scenario"] == "A" and first["status"] == "recovered" and first["trigger"] == "scheduled"
+    assert sch.tick(now=1_030.0) is None                                              # interval not reached
+    second = sch.tick(now=1_061.0)
+    assert second["scenario"] == "F" and second["status"] == "recovered"             # each run starts from baseline
+    assert sch.settings()["enabled"] is False and sch.tick(now=9_999.0) is None      # max runs reached -> disabled
+    client.put("/api/livedb/schedule", json={**body, "confirm": True})
+    assert client.post("/api/livedb/stop").json()["schedule"]["enabled"] is False   # immediate stop
+    assert st.livedb_stop.is_set()
+
+
+def test_stop_interrupts_a_running_experiment(env):
+    client, st, t = env
+    st.livedb_stop.set()
+    r = dbrepair.run_experiment(st, t, "A", "local")
+    assert r["status"] == "blocked" and "stopped by the operator" in r["error"] and len(r["stages"]) == 1
+
+
+# ---------------------------------------------------------------- statistics, export, redaction, separation
+def test_stats_come_from_persisted_records(env):
+    client, st, t = env
+    for sc in ("A", "D"):
+        client.post("/api/livedb/setup", json={"reset": True, "confirm": True})
+        experiment(client, sc)
+    s = client.get("/api/livedb/stats").json()
+    assert s["runs"] == 2 and s["detected_faults"] == 2 and s["validated_patches"] == 1
+    assert s["applied_patches"] == 1 and s["verified_recoveries"] == 1 and s["refused"] == 1
+    assert s["recovery_samples"] == 1 and s["median_recovery_ms"] > 0
+
+
+def test_exports_and_status_never_contain_credentials(env, pg_uri):
+    client, st, t = env
+    experiment(client, "A")
+    blobs = [client.get(p).text for p in ("/api/livedb/status", "/api/livedb/export.json", "/api/livedb/export.csv",
+                                          "/api/livedb/experiments", "/api/livedb/evidence/export.json")]
+    blobs += [json.dumps(r, default=str) for r in q(t, "SELECT details_json, validation_result, verification_result "
+                                                       "FROM {s}.adaptix_audit_log")]
+    pw = __import__("urllib.parse").parse.urlsplit(pg_uri).password
+    for b in blobs:
+        assert pg_uri not in b and (not pw or pw not in b)
+    assert client.get("/api/incidents").json() == [] and client.get("/api/sim/incidents").json() == []
+    assert "DEMO EXPERIMENT" in client.get("/api/livedb/status").json()["label"]
+
+
+def test_safety_rules(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db.example.com/db")
     with pytest.raises(livedb.LiveDBError):
         livedb.target_from_env(schema="public")
+    assert livedb._with_tls("postgresql://u:p@db.example.com/db").endswith("sslmode=require")
+    with pytest.raises(livedb.LiveDBError):
+        livedb._with_tls("postgresql://u:p@db.example.com/db?sslmode=disable")
     monkeypatch.delenv("DATABASE_URL")
     with pytest.raises(livedb.LiveDBError) as e:
         livedb.target_from_env()
     assert e.value.category == "not_configured"
-    with pytest.raises(livedb.LiveDBError):
-        livedb._with_tls("postgresql://u:p@db.example.com/db?sslmode=disable")
-    assert livedb._with_tls("postgresql://u:p@db.example.com/db").endswith("sslmode=require")
 
 
-def test_table_browser_and_baseline(env):
+def test_no_free_form_sql_route(env):
     client, st, t = env
-    tables = {x["table"]: x for x in client.get("/api/livedb/tables").json()}
-    assert set(tables) == {"customers", "orders"} and tables["customers"]["rows"] == 12
-    cols = {c["name"]: c for c in tables["orders"]["columns"]}
-    assert cols["customer_id"]["comment"] == "Identifier of the customer placing the order"
-    assert cols["note"]["nullable"] is True and cols["customer_id"]["nullable"] is False
-    rows = client.get("/api/livedb/tables/orders", params={"limit": 3}).json()
-    assert len(rows["rows"]) == 3 and all(r["request_key"].startswith("seed-") for r in rows["rows"])
-    cust = client.get("/api/livedb/tables/customers", params={"limit": 2}).json()["rows"]
-    assert all(r["full_name"].startswith("Synthetic Customer") for r in cust)          # synthetic data only
-    sch = client.get("/api/livedb/schema").json()
-    assert sch["vs_baseline"]["changed"] is False and sch["baseline_signature"] == sch["current_signature"]
-    assert client.get("/api/livedb/monitor").json()["summary"] == "No schema drift detected"
+    paths = {r.path for r in client.app.routes if r.path.startswith("/api/livedb")}
+    assert not any("sql" in p.lower() or "query" in p.lower() for p in paths)
+    assert client.get("/api/livedb/tables/pg_authid").status_code == 422
 
 
-def test_no_fault_succeeds_without_an_incident(env):
-    client, st, t = env
-    r = experiment(client)
-    assert r["outcome"] == "succeeded_without_incident" and r["business"]["ok"]
-    ev = client.get("/api/livedb/evidence").json()[0]
-    assert ev["environment"] == "LIVE_DB_DEMO" and ev["expected"]["matches"] is True
-
-
-def test_rename_is_repaired_validated_sandboxed_applied_and_verified(env):
-    client, st, t = env
-    f = client.post("/api/livedb/inject", json={"fault": "rename_column", "column": "customer_id",
-                                                "new_name": "client_id"}).json()
-    assert f["ok"] and 'RENAME COLUMN "customer_id" TO "client_id"' in f["ddl"][0]
-    sch = client.get("/api/livedb/schema").json()
-    assert sch["current"]["client_id"]["renamed_from"] == "customer_id"          # proven by the catalog attnum
-    r = experiment(client)
-    assert r["outcome"] == "recovered" and r["tool_version"] == 2 and r["business"]["ok"]
-    assert set(r["phases"]) >= {"execute", "diagnose", "propose", "validate", "sandbox_test", "apply", "retry_and_verify"}
-    assert r["patch"] == [{"op": "map", "argument": "customer_id", "from": "body:customer_id", "to": "body:client_id",
-                           "transform": "none"}]
-    inc = client.get(f"/api/livedb/incidents/{r['incident']}").json()
-    assert inc["environment"] == "LIVE_DB_DEMO" and inc["llm"]["engine"] == "local"
-    assert any(s["stage"] == "validate" and "Sandbox test passed" in s["title"] for s in inc["timeline"])
-    with livedb.connect(t) as c:                                               # the order really is stored
-        n = c.execute(psycopg.sql.SQL("SELECT count(*) FROM {}.orders WHERE client_id='cust-0003' AND note=%s")
-                      .format(psycopg.sql.Identifier(t.schema)), ("deliver after 5pm",)).fetchone()[0]
-        sandbox_tables = c.execute("SELECT count(*) FROM information_schema.tables WHERE table_schema=%s",
-                                   (t.sandbox,)).fetchone()[0]
-    assert n == 1 and sandbox_tables == 0                                      # sandbox test left nothing behind
-    assert experiment(client)["outcome"] == "succeeded_without_incident"        # the repaired tool keeps working
-
-
-@pytest.mark.parametrize("fault,why", [
-    ({"fault": "add_required_column", "new_name": "channel"}, "required field"),
-    ({"fault": "remove_column", "column": "note"}, "silently dropped"),
-    ({"fault": "change_type", "column": "note", "new_type": "jsonb"}, "not of type"),
-])
-def test_unsafe_changes_stop_without_writing(env, fault, why):
-    client, st, t = env
-    assert client.post("/api/livedb/inject", json=fault).json()["ok"]
-    before = client.get("/api/livedb/tables").json()
-    r = experiment(client)
-    assert r["outcome"] == "stopped" and r["category"] == "schema_drift" and why in r["reason"]
-    after = client.get("/api/livedb/tables").json()
-    assert [x["rows"] for x in before] == [x["rows"] for x in after]           # nothing was inserted
-    assert len(client.get("/api/livedb/versions").json()) == 1
-    ev = client.get("/api/livedb/evidence").json()[0]
-    assert ev["expected"]["outcome"] == "stopped" and ev["expected"]["matches"] is True
-
-
-def test_coerced_type_change_is_not_a_failure(env):
-    client, st, t = env
-    assert client.post("/api/livedb/inject", json={"fault": "change_type", "column": "quantity",
-                                                   "new_type": "text"}).json()["ok"]
-    assert client.get("/api/livedb/monitor").json()["drift"] is True          # monitoring still reports it
-    r = experiment(client)
-    assert r["outcome"] == "succeeded_without_incident" and r["business"]["ok"]
-
-
-def test_failed_verification_rolls_back_transaction_and_registry(env):
-    client, st, t = env
-    client.post("/api/livedb/inject", json={"fault": "rename_column", "column": "customer_id", "new_name": "client_id"})
-    with livedb.connect(t) as c:                                               # TEST-ONLY: silently discard inserts
-        s = psycopg.sql.Identifier(t.schema)
-        c.execute(psycopg.sql.SQL("CREATE FUNCTION {}.drop_it() RETURNS trigger LANGUAGE plpgsql AS "
-                                  "$$ BEGIN RETURN NULL; END $$").format(s))
-        c.execute(psycopg.sql.SQL("CREATE TRIGGER drop_it BEFORE INSERT ON {}.orders FOR EACH ROW EXECUTE FUNCTION "
-                                  "{}.drop_it()").format(s, s))
-        c.commit()
-    r = experiment(client)
-    assert r["outcome"] == "rolled_back" and r["rolled_back"] and r["business"]["ok"] is False
-    assert [v["status"] for v in client.get("/api/livedb/versions").json()] == ["active", "rolled_back"]
-    ev = client.get("/api/livedb/evidence").json()[0]
-    assert ev["rollback"]["performed"] and ev["final"]["verified_recovery"] is False
-
-
-def test_engine_selection_never_switches_or_fabricates(env, monkeypatch):
-    client, st, t = env
-    client.post("/api/livedb/inject", json={"fault": "rename_column", "column": "customer_id", "new_name": "client_id"})
-    r = experiment(client, engine="gemini")                                    # no key in this test
-    assert r["outcome"] == "stopped" and "repair engine unavailable" in r["reason"]
-    inc = client.get(f"/api/livedb/incidents/{r['incident']}").json()
-    assert inc["llm"] is None and len(client.get("/api/livedb/versions").json()) == 1
-    monkeypatch.setattr("tests.local_repair_testmodule.propose",
-                        __import__("tests.local_repair_testmodule").local_repair_testmodule.propose_garbage)
-    r = experiment(client, engine="local")
-    inc = client.get(f"/api/livedb/incidents/{r['incident']}").json()
-    assert r["outcome"] == "stopped" and inc["llm"]["error_category"] == "invalid_output"
-    monkeypatch.delenv("ADAPTIX_LOCAL_REPAIR_MODULE")
-    assert client.get("/api/livedb/status").json()["engines"]["local"]["available"] is False
-    r = experiment(client, engine="local")
-    assert r["outcome"] == "stopped" and "Local Repair Module unavailable" in r["reason"]
-
-
-def test_reset_restores_baseline_and_clears_faults(env):
-    client, st, t = env
-    client.post("/api/livedb/inject", json={"fault": "remove_column", "column": "note"})
-    assert client.get("/api/livedb/status").json()["faults_since_reset"] == 1
-    assert client.post("/api/livedb/setup", json={"reset": True}).status_code == 422       # needs confirmation
-    client.post("/api/livedb/setup", json={"reset": True, "confirm": True})
-    assert client.get("/api/livedb/status").json()["faults_since_reset"] == 0
-    assert client.get("/api/livedb/schema").json()["vs_baseline"]["changed"] is False
-    bad = client.post("/api/livedb/inject", json={"fault": "rename_column", "column": "no_such", "new_name": "x"}).json()
-    assert bad["ok"] is False and bad["error"]                                 # failed DDL is reported, nothing changed
-    r = client.post("/api/livedb/inject", json={"fault": "rename_column", "column": "x; DROP TABLE y", "new_name": "z"})
-    assert r.status_code == 422                                               # identifiers are validated
-
-
-def test_scheduler_injects_within_interval_and_run_limit(env):
-    client, st, t = env
-    cfg = client.put("/api/livedb/schedule", json={"enabled": True, "interval_s": 60, "run_limit": 2,
-                                                   "auto_recover": True, "engine": "local",
-                                                   "faults": ["rename_column", "remove_column"]}).json()
-    assert cfg["runs_done"] == 0
-    sch = st.livedb_scheduler
-    first = sch.tick(now=1_000.0)
-    assert first["fault"]["fault"] == "rename_column" and first["experiment"]["outcome"] == "recovered"
-    assert sch.tick(now=1_030.0) is None                                       # interval not reached
-    second = sch.tick(now=1_061.0)
-    assert second["fault"]["fault"] == "remove_column" and second["fault"]["trigger"] == "scheduled"
-    assert sch.tick(now=2_000.0) is None and sch.settings()["runs_done"] == 2  # run limit reached
-    client.put("/api/livedb/schedule", json={**cfg, "enabled": False})
-    assert sch.due(now=9_999.0) is False
-
-
-def test_records_are_isolated_and_exports_are_redacted(env, pg_uri):
-    client, st, t = env
-    client.post("/api/livedb/inject", json={"fault": "rename_column", "column": "customer_id", "new_name": "client_id"})
-    experiment(client)
-    assert client.get("/api/incidents").json() == [] and client.get("/api/sim/incidents").json() == []
-    changes = client.get("/api/changes", params={"environment": "LIVE_DB_DEMO"}).json()
-    assert changes["total"] >= 1 and {r["environment_label"] for r in changes["rows"]} == {"LIVE DB DEMO"}
-    blobs = [client.get("/api/livedb/evidence/export.json").text, client.get("/api/livedb/evidence/export.csv").text,
-             client.get("/api/livedb/faults").text, client.get("/api/livedb/status").text]
-    password = __import__("urllib.parse").parse.urlsplit(pg_uri).password
-    for b in blobs:
-        assert pg_uri not in b and (not password or password not in b)
-
-
-@pytest.mark.skipif(not os.environ.get("GEMINI_API_KEY"), reason="live test: GEMINI_API_KEY not set")
-def test_live_gemini_repairs_a_renamed_column(pg_uri, tmp_path, monkeypatch):
-    """REAL Gemini proposes the repair against the real PostgreSQL catalog."""
-    monkeypatch.setenv("DATABASE_URL", pg_uri)
-    monkeypatch.setenv("ADAPTIX_LIVE_DB_SCHEMA", "adaptix_live" + uuid.uuid4().hex[:6])
-    st = State(Settings(admin_token=TOKEN), storage=Storage(tmp_path / "p.db"), start_monitor=False)
-    client = TestClient(create_app(st), headers={"Authorization": f"Bearer {TOKEN}"})
-    client.post("/api/livedb/setup", json={"reset": True, "confirm": True})
-    client.post("/api/livedb/inject", json={"fault": "rename_column", "column": "customer_id", "new_name": "client_id"})
-    r = experiment(client, engine="gemini")
-    ev = client.get("/api/livedb/evidence").json()[0]
-    assert r["outcome"] == "recovered" and ev["llm"]["real_request_performed"] and r["business"]["ok"]
-
-
-def test_dashboard_page_renders_every_tab_against_a_real_database(env, tmp_path, monkeypatch):
+def test_dashboard_page_renders_against_a_real_database(env, tmp_path, monkeypatch):
     from pathlib import Path
 
     import streamlit as st_
     from streamlit.testing.v1 import AppTest
 
     from adaptix.config import get_settings
-    client, st, t = env
     for k, v in {"ADAPTIX_DB_PATH": "p", "ADAPTIX_SIM_DB_PATH": "s", "ADAPTIX_TEST_DB_PATH": "t",
                  "ADAPTIX_LIVEDB_DB_PATH": "l"}.items():
         monkeypatch.setenv(k, str(tmp_path / f"ui-{v}.db"))
@@ -258,9 +317,27 @@ def test_dashboard_page_renders_every_tab_against_a_real_database(env, tmp_path,
     at.session_state["_force_page"] = "livedb"
     at.run()
     assert not at.exception, at.exception
-    next(b for b in at.button if b.label == "Set up demo schema").click().run()
+    next(b for b in at.button if b.label == "Set up demo database").click().run()
     assert not at.exception, at.exception
-    texts = [s.value for s in at.success] + [w.value for w in at.warning]
-    assert any("No schema drift detected" in v or "Schema drift" in v for v in texts), texts
+    assert any("DEMO EXPERIMENT" in m.value for m in at.markdown)
+    client, _, _ = env
+    at.session_state["ldb_exp"] = experiment(client, "C").json()            # a real experiment's timeline renders
+    at.run()
+    assert not at.exception, at.exception
+    assert any("PATCH APPLICATION" in m.value.upper() or "Patch application" in m.value for m in at.markdown)
     get_settings.cache_clear()
     st_.cache_resource.clear()
+
+
+@pytest.mark.skipif(not os.environ.get("GEMINI_API_KEY"), reason="live test: GEMINI_API_KEY not set")
+@pytest.mark.parametrize("scenario,status", [("A", "recovered"), ("D", "refused"), ("F", "recovered")])
+def test_live_gemini_experiments(pg_uri, tmp_path, monkeypatch, scenario, status):
+    """REAL Gemini (no mock) proposes repairs against the real PostgreSQL catalog."""
+    monkeypatch.setenv("DATABASE_URL", pg_uri)
+    monkeypatch.setenv("ADAPTIX_LIVE_DB_SCHEMA", "adaptix_live" + uuid.uuid4().hex[:6])
+    st = State(Settings(admin_token=TOKEN), storage=Storage(tmp_path / "p.db"), start_monitor=False)
+    client = TestClient(create_app(st), headers={"Authorization": f"Bearer {TOKEN}"})
+    client.post("/api/livedb/setup", json={})
+    r = experiment(client, scenario, engine="gemini").json()
+    prop = next(x for x in r["stages"] if x["stage"] == "proposal")
+    assert prop["detail"]["engine"]["real"] is True and r["status"] == status, r["stages"]
