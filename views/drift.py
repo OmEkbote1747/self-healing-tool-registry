@@ -1,7 +1,7 @@
 """Schema Drift Explorer: one selected tool at a time - registered schema vs the live authoritative schema."""
 import streamlit as st
 
-from views.common import ENV_PREFIX, api, empty, env_picker, header, safe_call
+from views.common import api, empty, env_picker, ENV_PREFIX, header, ist, safe_call
 
 KIND = {"added": "Added", "removed": "Removed", "renamed": "Renamed", "moved": "Moved", "type_changed": "Type changed",
         "required_changed": "Required ↔ optional", "enum_changed": "Allowed values changed",
@@ -104,7 +104,7 @@ def render():
     if not incs:
         st.caption("None recorded for this tool.")
         return
-    labels = {i["id"]: f"{i['started_at'][:19].replace('T', ' ')} · {i['status']} · {i['drift']['summary']}" for i in incs}
+    labels = {i["id"]: f"{ist(i['started_at'])} · {i['status']} · {i['drift']['summary']}" for i in incs}
     pick = st.selectbox("Incident", list(labels), format_func=labels.get, key=f"drift_inc_{env}_{sel}")
     i = next(x for x in incs if x["id"] == pick)
     _changes(i["drift"])

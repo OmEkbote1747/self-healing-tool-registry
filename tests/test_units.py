@@ -189,3 +189,13 @@ def test_schema_fingerprints_are_not_mistaken_for_secrets():
                   "card_number": "4111"})
     assert out["old_signature"] == "abc123" and out["new_signature"] == "def456" and out["scorecard"] == {"n": 1}
     assert out["x-signature"] != "s3cr3t" and out["card_number"] != "4111"
+
+
+def test_times_are_displayed_in_indian_standard_time():
+    from adaptix.timefmt import ist, ist_time
+    assert ist("2026-10-16T18:30:00+00:00") == "17 Oct 2026, 00:00:00 IST"          # date rolls over at IST midnight
+    assert ist("2026-10-16T09:12:09.674+00:00", seconds=False) == "16 Oct 2026, 14:42 IST"
+    assert ist_time("2026-10-16T09:12:09.674+00:00", millis=True) == "14:42:09.674 IST"
+    assert ist("2026-10-16T09:12:09Z") == "16 Oct 2026, 14:42:09 IST"                  # 'Z' suffix
+    assert ist("2026-10-16T09:12:09") == "16 Oct 2026, 14:42:09 IST"                   # naive = stored UTC
+    assert ist(None) == "—" and ist("not a time") == "—"

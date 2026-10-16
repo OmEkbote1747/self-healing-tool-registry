@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 
-from views.common import REAL_BADGE, SIM_BADGE, api, badge, empty, fmt_ms, fmt_pct, go, header, kpis, safe_call
+from views.common import api, badge, empty, fmt_ms, fmt_pct, go, header, ist, kpis, REAL_BADGE, safe_call, SIM_BADGE
 
 
 def render():
@@ -61,7 +61,7 @@ def render():
     else:
         st.subheader("Real APIs")
         st.dataframe([{"tool": t["tool"], "provider": t["provider"], "endpoint": f"{t['method']} {t['endpoint']}",
-                       "last checked": (t["last_check"] or {}).get("ts", "")[:19],
+                       "last checked": ist((t["last_check"] or {}).get("ts")),
                        "schema": ((t["last_check"] or {}).get("drift_summary") or (t["last_check"] or {}).get("schema_status")
                                   or "not checked"),
                        "verification": (t["last_check"] or {}).get("verification", "")} for t in tools],
@@ -76,7 +76,7 @@ def render():
             for i in safe_call(api, "GET", "/api/incidents", params={"limit": 6}) or []:
                 with st.container(border=True):
                     st.markdown(f"{badge(i['status'])} &nbsp; **{i['tool']}** &nbsp; {REAL_BADGE}", unsafe_allow_html=True)
-                    st.caption(f"{i['category'].replace('_', ' ')} · {fmt_ms(i['duration_ms'])} · {i['started_at'][:19]}Z")
+                    st.caption(f"{i['category'].replace('_', ' ')} · {fmt_ms(i['duration_ms'])} · {ist(i['started_at'])}")
                     if st.button("Open timeline", key=f"ov-{i['id']}", icon=":material/timeline:"):
                         go("recovery", incident_id=i["id"], env_choice="REAL API")
     with st.container(border=True):

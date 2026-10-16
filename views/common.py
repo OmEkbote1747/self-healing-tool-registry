@@ -201,3 +201,7 @@ def env_picker(key: str, label: str = "Environment") -> str:
     if env != "REAL API":
         st.caption(f"{env}: {ENV_NOTE[env]}. Not production data.")
     return env
+
+
+# Every displayed time is Indian Standard Time; records stay in UTC (see adaptix/timefmt.py)
+from adaptix.timefmt import IST, ist, ist_time  # noqa: E402,F401

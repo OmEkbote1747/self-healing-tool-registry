@@ -137,3 +137,17 @@ def test_evidence_page_empty_state_and_scorecard_rows():
     stages = list(at.dataframe[0].value["stage"])
     assert stages[:6] == ["Incidents recorded", "Schema drift detected", "Repairs proposed", "Patches validated",
                           "Patches applied", "Verified recoveries"]
+
+
+def test_displayed_times_are_ist():
+    at = _page("demo", timeout=120)
+    at.checkbox(key="demo_confirm").check().run()
+    next(b for b in at.button if b.label == "Introduce change").click().run()
+    assert not at.exception, at.exception
+    text = _text(at)
+    assert " IST" in text and "UTC" not in text and "Z ·" not in text
+    at.session_state["_force_page"] = "evidence"
+    at.session_state["env_choice"] = "REAL API TEST"
+    at.run()
+    inc_box = next(s for s in at.selectbox if s.label == "Incident")
+    assert inc_box.options and all(" IST · " in o for o in inc_box.options), inc_box.options   # labels as shown
