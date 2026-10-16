@@ -18,7 +18,7 @@ class SchemaSource(BaseModel):
     model_config = ConfigDict(extra="forbid")
     # "none": the provider publishes no machine-readable schema. ADAPTIX then uses the operator's declared
     # fields (NOT authoritative), cannot verify drift and never repairs the tool (fail closed).
-    kind: Literal["openapi", "json_schema", "none"] = "openapi"
+    kind: Literal["openapi", "json_schema", "none", "postgres_catalog"] = "openapi"
     url: str | None = None            # default: <base_url>/openapi.json
     declared_fields: dict[str, str] = {}   # kind "none" only: {"query:status": "str", "body:name": "str"}
 
@@ -52,6 +52,8 @@ class ToolSpec(BaseModel):
         return self.idempotent if self.idempotent is not None else self.method in ("GET", "PUT", "DELETE")
 
     def schema_url(self) -> str:
+        if self.schema_source.kind == "postgres_catalog":
+            return self.base_url.rstrip("/") + " (pg_catalog / information_schema)"
         return self.schema_source.url or self.base_url.rstrip("/") + "/openapi.json"
 
 

@@ -17,7 +17,8 @@ from .security import redact, scrub
 
 SOURCE = {"LIVE_API": "real external provider over HTTPS (SSRF-guarded)",
           "REAL_API_TEST": "controlled test service: real HTTP server on 127.0.0.1 run by ADAPTIX",
-          "SIMULATION": "in-process simulated API (no network)"}
+          "SIMULATION": "in-process simulated API (no network)",
+          "LIVE_DB_DEMO": "online PostgreSQL (e.g. Neon), isolated demo schema with synthetic data"}
 
 
 def sanitize_url(url: str) -> str:
@@ -88,9 +89,9 @@ def build(engine, incident: dict | None, *, run_id: str, scenario: str | None, t
         "final": {"outcome": outcome, "verified_recovery": verified, "reason": inc.get("reason")
                   or (result or {}).get("reason")},
         "expected": {"outcome": expected, "category": expected_category,
-                     "matches": None if expected is None else (("recovered" if outcome in
-                                                                ("recovered", "succeeded_without_incident")
-                                                                else outcome) == expected)},
+                     "matches": None if expected is None else (
+                         outcome == expected or (outcome == "succeeded_without_incident" and expected in
+                                                 ("recovered", "succeeded")))},
         "audit": {"correlation_id": inc.get("correlation_id") or (result or {}).get("correlation_id"),
                   "events": len(st.events(correlation_id=inc.get("correlation_id"), limit=500))
                   if inc.get("correlation_id") else 0},

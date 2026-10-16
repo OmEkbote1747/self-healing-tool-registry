@@ -61,7 +61,8 @@ class IsolationError(RuntimeError):
     """An attempt to mix simulation and production records."""
 
 
-ENVIRONMENT = {"production": "LIVE_API", "real_api_test": "REAL_API_TEST", "simulation": "SIMULATION"}
+ENVIRONMENT = {"production": "LIVE_API", "real_api_test": "REAL_API_TEST", "simulation": "SIMULATION",
+               "live_db": "LIVE_DB_DEMO"}
 
 
 class Storage:
@@ -166,7 +167,8 @@ class Storage:
     def register(self, spec: ToolSpec, td: ToolDef, op: Operation):
         self._guard(spec.simulated, "tool")
         if spec.base_url.startswith("sim://") != self.simulated or \
-                (self.mode == "real_api_test" and not spec.base_url.startswith("http://127.0.0.1:")):
+                (self.mode == "real_api_test" and not spec.base_url.startswith("http://127.0.0.1:")) or \
+                ((self.mode == "live_db") != spec.base_url.startswith("pg://")):
             raise IsolationError(f"{spec.base_url} cannot be registered in the {self.mode} store")
         sig = self.save_schema(op)
         td.schema_signature = sig
@@ -380,6 +382,15 @@ class Storage:
         a.append(min(limit, 1000))
         with self._conn() as c:
             return [json.loads(r["data"]) for r in c.execute(q, a)]
+
+    def get_meta(self, key: str) -> str | None:
+        with self._conn() as c:
+            r = c.execute("SELECT value FROM meta WHERE key=?", ("x:" + key,)).fetchone()
+        return r["value"] if r else None
+
+    def set_meta(self, key: str, value: str):
+        with self._tx() as c:
+            c.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", ("x:" + key, value))
 
     def update_spec(self, spec: ToolSpec):
         self._guard(spec.simulated, "tool")

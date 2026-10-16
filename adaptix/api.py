@@ -82,6 +82,39 @@ class MatrixIn(BaseModel):
     seed: int = Field(default=7, ge=0, le=10_000)
 
 
+class LiveFaultIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    fault: Literal["rename_column", "change_type", "add_required_column", "remove_column"]
+    column: str | None = Field(default=None, max_length=41)
+    new_name: str | None = Field(default=None, max_length=41)
+    new_type: str | None = None
+
+
+class LiveExperimentIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    engine: Literal["gemini", "local"]
+    customer_id: str = Field(default="cust-0003", max_length=64)
+    sku: str = Field(default="SKU-200", max_length=64)
+    quantity: int = Field(default=2, ge=1, le=100)
+    note: str | None = Field(default="deliver after 5pm", max_length=200)
+
+
+class LiveScheduleIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool
+    interval_s: int = Field(ge=60, le=86400)
+    run_limit: int = Field(ge=1, le=100)
+    auto_recover: bool = True
+    engine: Literal["gemini", "local"] = "gemini"
+    faults: list[Literal["rename_column", "change_type", "add_required_column", "remove_column"]] = Field(min_length=1)
+
+
+class LiveSetupIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reset: bool = False
+    confirm: bool = False
+
+
 class MonitorSettingsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool | None = None
@@ -106,7 +139,7 @@ class State:
                  start_monitor: bool | None = None):
         self.settings = settings
         if storage is None and sim_storage is None and len({settings.db_path, settings.sim_db_path,
-                                                             settings.test_db_path}) < 3:
+                                                             settings.test_db_path, settings.livedb_db_path}) < 4:
             raise IsolationError("ADAPTIX_DB_PATH, ADAPTIX_SIM_DB_PATH and ADAPTIX_TEST_DB_PATH must be different files")
         self.storage = storage or Storage(settings.db_path, mode="production")
         self.creds = creds or CredentialRegistry.from_env()
@@ -132,6 +165,11 @@ class State:
         self.test_service = None
         self.test_lock = threading.Lock()
         self._svc_lock = threading.Lock()
+        # LIVE_DB_DEMO: controlled experiments on an online PostgreSQL demo schema (separate records)
+        live_path = settings.livedb_db_path if storage is None else str(self.storage.path) + ".livedb"
+        self.livedb_storage = Storage(live_path, mode="live_db")
+        from .dbrepair import Scheduler
+        self.livedb_scheduler = Scheduler(self)
         self.monitor = Monitor(self.engine, settings)
         self.started = time.time()
         self.lock = threading.Lock()
@@ -140,6 +178,7 @@ class State:
         self.test_storage.purge(settings.retention_days)
         if start_monitor if start_monitor is not None else settings.monitor_enabled:
             self.monitor.start()
+            self.livedb_scheduler.start()          # idle unless the operator enables a schedule
 
     def test_service_started(self):
         """Start the controlled test service once; only its exact address is exempt from the egress allowlist."""
@@ -381,7 +420,8 @@ def create_app(state: State | None = None) -> FastAPI:
 
     # ---------------------------------------------------------------- cross-environment views (labelled)
     def worlds(environment: list[str] | None = None) -> dict:
-        all_w = {"LIVE_API": st.storage, "REAL_API_TEST": st.test_storage, "SIMULATION": st.sim_storage}
+        all_w = {"LIVE_API": st.storage, "REAL_API_TEST": st.test_storage, "SIMULATION": st.sim_storage,
+                 "LIVE_DB_DEMO": st.livedb_storage}
         return {k: v for k, v in all_w.items() if not environment or k in environment}
 
     @app.get("/api/changes", dependencies=[Depends(admin)])
@@ -394,6 +434,172 @@ def create_app(state: State | None = None) -> FastAPI:
         rows = changes_mod.collect(worlds())
         return changes_mod.query(rows, q, environment or None, change_type or None, repair_status or None,
                                  verification or None, since, until, sort, order, page, page_size)
+
+    # ---------------------------------------------------------------- LIVE_DB_DEMO: online PostgreSQL demo target
+    from . import dbrepair, livedb
+
+    def live_target():
+        try:
+            return livedb.target_from_env()
+        except livedb.LiveDBError as e:
+            raise HTTPException(409 if e.category == "not_configured" else 422,
+                                {"error": e.category, "detail": str(e)})
+
+    def live_call(fn, *a, **kw):
+        try:
+            return fn(*a, **kw)
+        except livedb.LiveDBError as e:
+            raise HTTPException(502 if e.category in ("connection", "authentication") else 422,
+                                {"error": e.category, "detail": scrub(str(e))[:300]})
+        except dbrepair.EngineUnavailable as e:
+            raise HTTPException(409, {"error": "engine_unavailable", "detail": str(e)})
+        except Exception as e:                       # psycopg errors: categorised, scrubbed, never raw traces
+            import psycopg
+            if isinstance(e, psycopg.Error):
+                raise HTTPException(502, {"error": "database_error", "sqlstate": getattr(e, "sqlstate", None),
+                                          "detail": scrub(str(e)).split("\n")[0][:300]})
+            raise
+
+    @app.get("/api/livedb/status", dependencies=[Depends(admin)])
+    def livedb_status():
+        try:
+            t = livedb.target_from_env()
+            target, configured, problem = t.display(), True, None
+        except livedb.LiveDBError as e:
+            target, configured, problem = None, False, str(e)
+        st_ = st.livedb_storage
+        return {"configured": configured, "problem": problem, "target": target, "engines": dbrepair.engines(st),
+                "set_up": st_.tool(dbrepair.TOOL) is not None, "schedule": st.livedb_scheduler.settings(),
+                "expected_now": dbrepair.expected_outcome(st), "faults_since_reset": len(dbrepair.fault_log(st))}
+
+    @app.post("/api/livedb/test-connection", dependencies=[Depends(admin)])
+    def livedb_test():
+        return live_call(livedb.test_connection, live_target())
+
+    @app.post("/api/livedb/setup", dependencies=[Depends(admin)])
+    def livedb_setup(body: LiveSetupIn):
+        if body.reset and not body.confirm:
+            raise HTTPException(422, {"error": "confirmation_required", "detail": "reset drops and recreates the demo "
+                                      "schema; send confirm=true"})
+        t = live_target()
+        out = live_call(livedb.setup, t, body.reset)
+        td = live_call(dbrepair.register, st, t)
+        st.livedb_storage.set_meta("reset_at", now_iso())
+        st.livedb_storage.event("demo_reset" if body.reset else "demo_setup", dbrepair.TOOL,
+                                {"schema": t.schema, "baseline_signature": td.schema_signature})
+        return out | {"baseline_signature": td.schema_signature, "tool_version": td.version}
+
+    @app.get("/api/livedb/tables", dependencies=[Depends(admin)])
+    def livedb_tables():
+        return live_call(livedb.browse, live_target())
+
+    @app.get("/api/livedb/tables/{table}", dependencies=[Depends(admin)])
+    def livedb_table(table: str, limit: int = Query(20, ge=1, le=100)):
+        return live_call(livedb.sample, live_target(), table, limit)
+
+    @app.get("/api/livedb/schema", dependencies=[Depends(admin)])
+    def livedb_schema():
+        """Baseline (registered at setup) vs current catalog vs the tool's active version. Read-only."""
+        from .diff import diff as do_diff
+        stl = st.livedb_storage
+        if stl.tool(dbrepair.TOOL) is None:
+            raise HTTPException(409, {"error": "not_set_up", "detail": "run Setup first"})
+        t = live_target()
+        base = stl.get_schema(stl.get_meta("baseline_signature"))
+        td = stl.current(dbrepair.TOOL)
+        active = stl.get_schema(td.schema_signature)
+        cur = live_call(livedb.snapshot, t, active)
+        side = lambda op: {k.split(":", 1)[1]: {"type": f.schema.get("x-pg-type"), "required": f.required,
+                                                "attnum": f.schema.get("x-attnum"), "comment": f.description,
+                                                "renamed_from": f.renamed_from} for k, f in op.fields.items()}
+        return {"baseline": side(base), "current": side(cur), "baseline_signature": base.signature(),
+                "current_signature": cur.signature(), "vs_baseline": do_diff(base, cur).model_dump(),
+                "vs_active_tool": do_diff(active, cur).model_dump(), "tool_version": td.version,
+                "mapping": {loc.split(":", 1)[1]: v for loc, v in td.request_map.items()}}
+
+    @app.post("/api/livedb/inject", dependencies=[Depends(admin)])
+    def livedb_inject(body: LiveFaultIn):
+        if st.livedb_storage.tool(dbrepair.TOOL) is None:
+            raise HTTPException(409, {"error": "not_set_up", "detail": "run Setup first"})
+        return live_call(dbrepair.record_fault, st, live_target(), body.fault, column=body.column,
+                         new_name=body.new_name, new_type=body.new_type)
+
+    @app.get("/api/livedb/faults", dependencies=[Depends(admin)])
+    def livedb_faults():
+        return {"since_reset": dbrepair.fault_log(st),
+                "all": [e["data"] | {"ts": e["ts"]} for e in st.livedb_storage.events(kind="fault_injected", limit=200)]}
+
+    @app.get("/api/livedb/schedule", dependencies=[Depends(admin)])
+    def livedb_schedule_get():
+        return st.livedb_scheduler.settings()
+
+    @app.put("/api/livedb/schedule", dependencies=[Depends(admin)])
+    def livedb_schedule_put(body: LiveScheduleIn):
+        cfg = st.livedb_scheduler.settings()
+        if body.engine == "local" and not dbrepair.engines(st)["local"]["available"]:
+            raise HTTPException(409, {"error": "engine_unavailable", "detail": "the Local Repair Module is not available"})
+        reset_count = body.enabled and not cfg["enabled"]
+        cfg.update(body.model_dump())
+        if reset_count:
+            cfg.update(runs_done=0, last_run=None)
+        st.livedb_scheduler.save(cfg)
+        st.livedb_storage.event("schedule_updated", dbrepair.TOOL, cfg)
+        return cfg
+
+    @app.post("/api/livedb/experiment", dependencies=[Depends(admin)])
+    def livedb_experiment(body: LiveExperimentIn):
+        if st.livedb_storage.tool(dbrepair.TOOL) is None:
+            raise HTTPException(409, {"error": "not_set_up", "detail": "run Setup first"})
+        args = body.model_dump(exclude={"engine"})
+        with st.livedb_scheduler.lock:
+            return live_call(dbrepair.run, st, live_target(), body.engine, args,
+                             dbrepair.expected_outcome(st, args))
+
+    @app.get("/api/livedb/monitor", dependencies=[Depends(admin)])
+    def livedb_monitor():
+        """Read-only monitoring: compares the live catalog with the baseline. Never injects or writes."""
+        from .diff import diff as do_diff
+        stl = st.livedb_storage
+        if stl.tool(dbrepair.TOOL) is None:
+            raise HTTPException(409, {"error": "not_set_up", "detail": "run Setup first"})
+        base = stl.get_schema(stl.get_meta("baseline_signature"))
+        cur = live_call(livedb.snapshot, live_target(), base)
+        rep = do_diff(base, cur)
+        return {"checked_at": now_iso(), "drift": rep.changed,
+                "summary": rep.summary if rep.changed else "No schema drift detected", "report": rep.model_dump()}
+
+    @app.get("/api/livedb/incidents", dependencies=[Depends(admin)])
+    def livedb_incidents(limit: int = Query(100, ge=1, le=1000)):
+        return [i.model_dump(mode="json") for i in st.livedb_storage.incidents(limit=limit)]
+
+    @app.get("/api/livedb/incidents/{incident_id}", dependencies=[Depends(admin)])
+    def livedb_incident(incident_id: str):
+        i = st.livedb_storage.incident(incident_id) or not_found(incident_id)
+        return i.model_dump(mode="json")
+
+    @app.get("/api/livedb/versions", dependencies=[Depends(admin)])
+    def livedb_versions():
+        return [x.describe() | {"parent_version": x.parent_version, "incident_id": x.incident_id, "patch": x.patch}
+                for x in st.livedb_storage.versions(dbrepair.TOOL)]
+
+    @app.get("/api/livedb/evidence", dependencies=[Depends(admin)])
+    def livedb_evidence(limit: int = Query(200, ge=1, le=2000)):
+        return st.livedb_storage.evidence(limit)
+
+    @app.get("/api/livedb/evidence/export.json", dependencies=[Depends(admin)])
+    def livedb_evidence_json():
+        recs = st.livedb_storage.evidence(5000)
+        return {"environment": "LIVE_DB_DEMO", "exported_at": now_iso(), "records": recs,
+                "scorecard": evidence_mod.scorecard(recs),
+                "note": "Redacted: no DATABASE_URL, passwords, API keys or authorization headers."}
+
+    @app.get("/api/livedb/evidence/export.csv", dependencies=[Depends(admin)], response_class=PlainTextResponse)
+    def livedb_evidence_csv():
+        return PlainTextResponse(evidence_mod.to_csv(st.livedb_storage.evidence(5000)), media_type="text/csv")
+
+    @app.get("/api/livedb/scorecard", dependencies=[Depends(admin)])
+    def livedb_scorecard():
+        return evidence_mod.scorecard(st.livedb_storage.evidence(5000)) | {"environment": "LIVE_DB_DEMO"}
 
     @app.get("/api/overview", dependencies=[Depends(admin)])
     def overview():
