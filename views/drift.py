@@ -60,7 +60,10 @@ def render(prefix: str = "/api"):
               "chaos" if sim else "monitoring")
         return
     names = [t["name"] for t in tools]
-    tab_live, tab_inc = st.tabs(["Live comparison", "Drift in an incident"])
+    tab_live, tab_inc, tab_all = st.tabs(["Live comparison", "Drift in an incident", "All changes (every environment)"])
+    with tab_all:
+        from views.changes import render_table
+        render_table(["SIMULATION"] if sim else None, key="drift-chg")
     with tab_live:
         sel = st.selectbox("Tool", names, index=names.index(st.session_state["tool"]) if st.session_state.get("tool") in names else 0)
         d = safe_call(api, "GET", f"{prefix}/tools/{sel}/drift")

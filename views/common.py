@@ -82,6 +82,8 @@ def api(method: str, path: str, **kw):
         except Exception:
             detail = r.text[:200]
         raise ApiError(r.status_code, detail)
+    if "application/json" not in r.headers.get("content-type", ""):
+        return r.text                                  # e.g. the CSV evidence export
     return r.json()
 
 
