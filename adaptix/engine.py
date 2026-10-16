@@ -407,7 +407,8 @@ class Engine:
 
     # ---------------------------------------------------------------- request repair (E-K)
     def _plan(self, spec, td, args, inc, old, new, report, sent) -> RepairPlan:
-        cached = self.storage.get_mapping(spec.name, td.schema_signature, new.signature())
+        # a run that requires the LLM never reuses a cached repair: the LLM must propose this one
+        cached = None if self.llm_required else self.storage.get_mapping(spec.name, td.schema_signature, new.signature())
         if cached:
             plan = RepairPlan.model_validate({**cached, "source": "reuse"})
             inc.add("plan", "Reusing a previously validated repair for this exact schema change (revalidated below)",

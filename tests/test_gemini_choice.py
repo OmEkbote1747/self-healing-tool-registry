@@ -108,3 +108,13 @@ def test_name_based_evidence_from_gemini_is_held_to_the_strict_name_check(world)
     script.append(plan("body:userId", "email"))                  # "field names: email -> userId" is not a rename
     run = simulate(client, "gemini")
     assert run["outcome"] == "stopped" and run["repair_by"] is None
+
+
+def test_gemini_choice_does_not_reuse_a_cached_rules_repair(world):
+    client, _, script, calls = world
+    assert simulate(client, "none")["repair_by"] == "rules planner"        # caches a validated repair
+    assert simulate(client, "none")["repair_by"] == "previously validated repair (reused)"
+    script.append(plan("body:userId", "user_id"))
+    run = simulate(client, "gemini")
+    assert len(calls) == 1 and run["outcome"] == "recovered"
+    assert run["repair_by"].startswith("not a real request (test double)")
