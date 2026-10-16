@@ -62,8 +62,10 @@ class Credential:
 
 
 class CredentialRegistry:
-    def __init__(self, credentials: list[Credential], secrets: dict[str, str] | None = None):
+    def __init__(self, credentials: list[Credential], secrets: dict[str, str] | None = None,
+                 allow_simulated: bool = True):
         self._creds = credentials
+        self.allow_simulated = allow_simulated   # False for the production registry
         self._secrets: dict[str, str] = {}       # alias -> value (server memory only)
         self._lock = threading.Lock()
         for c in credentials:
@@ -87,10 +89,12 @@ class CredentialRegistry:
             if env("GEMINI_API_KEY_SECONDARY"):
                 creds.append(Credential("gemini-secondary", "gemini", "gemini", "GEMINI_API_KEY_SECONDARY",
                                         scope=["llm"]))
-        return CredentialRegistry(creds)
+        return CredentialRegistry(creds, allow_simulated=False)
 
     def add_simulated_group(self, group: str, header: str, aliases: list[str]) -> dict[str, str]:
-        """Throwaway random keys for the simulated APIs in the Chaos Lab. Never real credentials."""
+        """Throwaway random keys for the simulated APIs in the Simulation Lab. Never real credentials."""
+        if not self.allow_simulated:
+            raise CredentialError("not_permitted", "simulated credentials cannot be added to the production registry")
         values = {}
         with self._lock:
             for a in aliases:

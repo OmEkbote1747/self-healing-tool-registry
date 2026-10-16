@@ -20,20 +20,20 @@ def timeline(inc: dict):
                     st.write(s["detail"])
 
 
-def render():
-    header("Recovery Center", "Every incident, step by step",
+def render(prefix: str = "/api"):
+    sim = prefix == "/api/sim"
+    header("Simulation Records" if sim else "Recovery Center", "Every incident, step by step",
            "Request, classification, schema discovery, diff, plan, validation, apply, retry, verification and "
            "rollback, with the outcome and the reason. Correlation IDs link incidents to audit events.")
-    c1, c2, c3 = st.columns(3)
+    if sim:
+        st.markdown(f"{SIM_BADGE} &nbsp; Simulation database only.", unsafe_allow_html=True)
+    c1, c3 = st.columns(2)
     status = c1.selectbox("Outcome", ["all", "recovered", "stopped", "failed", "rolled_back"])
-    src = c2.selectbox("Source", ["all", "real traffic", "simulated"])
     tool = c3.text_input("Tool contains")
     params = {"limit": 300}
     if status != "all":
         params["status"] = status
-    if src != "all":
-        params["simulated"] = src == "simulated"
-    incs = safe_call(api, "GET", "/api/incidents", params=params)
+    incs = safe_call(api, "GET", f"{prefix}/incidents", params=params)
     if incs is None:
         return
     incs = [i for i in incs if tool.lower() in i["tool"].lower()]
@@ -46,7 +46,7 @@ def render():
     labels = {i["id"]: f"{i['started_at'][:19]} · {i['tool']} · {i['status']} · {i['category']}"
               + ("" if i.get("healing", True) else " · baseline") for i in incs}
     sel = st.selectbox("Incident", ids, index=ids.index(want) if want in ids else 0, format_func=labels.get)
-    inc = safe_call(api, "GET", f"/api/incidents/{sel}")
+    inc = safe_call(api, "GET", f"{prefix}/incidents/{sel}")
     if not inc:
         return
     st.markdown(f"### {badge(inc['status'])} &nbsp; `{inc['tool']}` " + (SIM_BADGE if inc["simulated"] else "")
@@ -85,7 +85,7 @@ def render():
         if inc.get("result") is not None:
             st.subheader("Mapped result")
             st.json(inc["result"], expanded=False)
-        events = safe_call(api, "GET", "/api/audit", params={"correlation_id": inc["correlation_id"], "limit": 50}) or []
+        events = safe_call(api, "GET", f"{prefix}/audit", params={"correlation_id": inc["correlation_id"], "limit": 50}) or []
         if events:
             st.subheader("Audit events")
             st.dataframe([{"time": e["ts"][11:19], "event": e["kind"]} for e in events], hide_index=True,

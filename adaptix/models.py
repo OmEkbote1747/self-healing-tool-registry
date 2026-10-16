@@ -16,8 +16,11 @@ def now_iso() -> str:
 
 class SchemaSource(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    kind: Literal["openapi", "json_schema"] = "openapi"
+    # "none": the provider publishes no machine-readable schema. ADAPTIX then uses the operator's declared
+    # fields (NOT authoritative), cannot verify drift and never repairs the tool (fail closed).
+    kind: Literal["openapi", "json_schema", "none"] = "openapi"
     url: str | None = None            # default: <base_url>/openapi.json
+    declared_fields: dict[str, str] = {}   # kind "none" only: {"query:status": "str", "body:name": "str"}
 
 
 class ToolSpec(BaseModel):
@@ -38,6 +41,12 @@ class ToolSpec(BaseModel):
     echo_output: str | None = "received"        # response path echoing the applied data (verification)
     depends_on: list[str] = []
     simulated: bool = False
+    # real-API monitoring
+    provider: str = Field(default="", max_length=120)   # who operates the API, e.g. "Swagger Petstore (swagger.io)"
+    monitor_enabled: bool = True
+    monitor_interval_s: int | None = Field(default=None, ge=300, le=7 * 86400)   # None: the global default
+    # A safe, read-only sample call used to verify the task during checks. Only executed for GET tools.
+    probe_arguments: dict | None = None
 
     def is_idempotent(self) -> bool:
         return self.idempotent if self.idempotent is not None else self.method in ("GET", "PUT", "DELETE")

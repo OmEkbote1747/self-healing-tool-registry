@@ -1,19 +1,30 @@
-"""HTTP clients for upstream APIs.
+"""HTTP access to upstream APIs, split by mode and enforced here (not in the UI).
 
-Real tools (http/https base URLs) get a pooled httpx.Client with timeouts. Simulated tools (sim://name)
-are routed in-process to a simulated FastAPI app from the Chaos Lab; nothing leaves the process.
+* production: REAL providers only, every request through the SSRF guard (allowlist, public IPs, DNS
+  pinning, verified TLS, validated redirects, per-host pacing). sim:// endpoints are refused.
+* simulation: in-process simulated APIs (sim://name) only. Nothing leaves the process; any real URL is
+  refused, so a simulated schema mutation can never be sent to a real provider.
 """
 from __future__ import annotations
 
 import threading
+from types import SimpleNamespace
 
 import httpx
 
+from .netguard import EgressDenied, GuardedHTTP
+
+MODES = ("production", "simulation")
+
 
 class Upstreams:
-    def __init__(self, timeout_s: float = 10.0):
-        self.timeout_s = timeout_s
-        self._clients: dict[str, httpx.Client] = {}
+    def __init__(self, timeout_s: float = 10.0, mode: str = "simulation", guard: GuardedHTTP | None = None,
+                 max_schema_bytes: int = 5_000_000):
+        if mode not in MODES:
+            raise ValueError(f"unknown mode {mode}")
+        self.mode, self.timeout_s, self.max_schema_bytes = mode, timeout_s, max_schema_bytes
+        self.guard = guard if guard is not None else (GuardedHTTP((), timeout_s=timeout_s) if mode == "production" else None)
+        self._sim_clients: dict[str, object] = {}
         self._sim_apps: dict[str, object] = {}
         self._lock = threading.Lock()
 
@@ -21,31 +32,51 @@ class Upstreams:
     def is_simulated(base_url: str) -> bool:
         return base_url.startswith("sim://")
 
+    # ---------------------------------------------------------------- simulated APIs
     def set_simulated(self, name: str, app):
         """Install or replace (i.e. 'drift') the simulated API behind sim://<name>."""
+        if self.mode != "simulation":
+            raise EgressDenied("simulated_in_production", "simulated APIs cannot be installed in production mode")
         from fastapi.testclient import TestClient
         with self._lock:
             self._sim_apps[name] = app
-            self._clients[f"sim://{name}"] = TestClient(app, base_url=f"http://{name}.simulated")
+            self._sim_clients[name] = TestClient(app, base_url=f"http://{name}.simulated")
 
     def sim_app(self, name: str):
         return self._sim_apps.get(name)
 
-    def client(self, base_url: str) -> httpx.Client:
-        with self._lock:
-            if base_url not in self._clients:
-                if self.is_simulated(base_url):
-                    raise KeyError(f"simulated API {base_url} is not running")
-                self._clients[base_url] = httpx.Client(
-                    base_url=base_url, timeout=httpx.Timeout(self.timeout_s),
-                    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10), follow_redirects=False)
-            return self._clients[base_url]
+    def _sim_client(self, url: str):
+        name = url[len("sim://"):].split("/", 1)[0]
+        c = self._sim_clients.get(name)
+        if c is None:
+            raise KeyError(f"simulated API sim://{name} is not running")
+        return c
 
+    def _check_mode(self, url: str):
+        sim = self.is_simulated(url)
+        if self.mode == "production" and sim:
+            raise EgressDenied("simulated_in_production", "sim:// endpoints are not allowed in production mode")
+        if self.mode == "simulation" and not sim:
+            raise EgressDenied("real_in_simulation", "the Simulation Lab never contacts real providers")
+
+    # ---------------------------------------------------------------- requests
     def request(self, base_url: str, method: str, url: str, **kw) -> httpx.Response:
-        c = self.client(base_url)
+        self._check_mode(base_url)
         if self.is_simulated(base_url):
             kw.pop("timeout", None)            # in-process test client does not support per-request timeouts
-        return c.request(method, url, **kw)
+            return self._sim_client(base_url).request(method, url, **kw)
+        headers = {"Accept": "application/json", **(kw.pop("headers", None) or {})}
+        return self.guard.request(method, base_url.rstrip("/") + url, headers=headers, **kw)
 
-    def get(self, base_url: str, url: str) -> httpx.Response:
-        return self.client(base_url).get(url)
+    def fetch_json(self, url: str) -> SimpleNamespace:
+        """GET an (absolute) schema URL. Returns status and parsed JSON (None if not JSON)."""
+        self._check_mode(url)
+        if self.is_simulated(url):
+            path = "/" + url[len("sim://"):].split("/", 1)[1] if "/" in url[len("sim://"):] else "/"
+            r = self._sim_client(url).get(path)
+            try:
+                return SimpleNamespace(status=r.status_code, json=r.json())
+            except ValueError:
+                return SimpleNamespace(status=r.status_code, json=None)
+        status, doc = self.guard.get_json(url, self.max_schema_bytes)
+        return SimpleNamespace(status=status, json=doc)

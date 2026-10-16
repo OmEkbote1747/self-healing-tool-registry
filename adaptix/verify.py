@@ -27,7 +27,33 @@ def expected_echo(req: dict) -> dict:
     return out
 
 
-def verify(spec: ToolSpec, td: ToolDef, response, req: dict) -> VerificationResult:
+def verify_by_schema(response, op) -> VerificationResult:
+    """Read operations (no status/echo output): the response must conform to the authoritative response schema."""
+    import jsonschema
+    if op is None or not op.response_schema or op.source not in ("openapi", "json_schema"):
+        return VerificationResult(ok=False, checks=[{"name": "authoritative response schema available", "ok": False,
+                                                     "detail": "no authoritative response schema, so the result "
+                                                               "cannot be verified"}])
+    sample = response[:100] if isinstance(response, list) else response      # bounded work on large lists
+    schema = op.response_schema
+    try:
+        jsonschema.validate(sample, schema)
+        return VerificationResult(ok=True, checks=[{"name": "response conforms to the authoritative schema", "ok": True,
+                                                    "detail": f"validated {len(sample) if isinstance(sample, list) else 1}"
+                                                              f" item(s) against {op.source}"}])
+    except jsonschema.ValidationError as e:
+        where = "/".join(str(p) for p in e.absolute_path) or "(root)"
+        return VerificationResult(ok=False, contract_drift=False, checks=[{
+            "name": "response conforms to the authoritative schema", "ok": False,
+            "detail": f"{where}: {e.validator} check failed"}])
+    except jsonschema.SchemaError:
+        return VerificationResult(ok=False, checks=[{"name": "response schema usable", "ok": False,
+                                                     "detail": "the published response schema is not valid JSON Schema"}])
+
+
+def verify(spec: ToolSpec, td: ToolDef, response, req: dict, op=None) -> VerificationResult:
+    if not td.response_map:
+        return verify_by_schema(response, op)
     checks, drift = [], False
     if not isinstance(response, dict):
         return VerificationResult(ok=False, checks=[{"name": "JSON object response", "ok": False,
