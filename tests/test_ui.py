@@ -29,3 +29,16 @@ runpy.run_path("app.py", run_name="__main__")
     next(b for b in at.button if b.label.startswith("Approve and retry")).click().run()
     assert not at.exception
     assert any("Approved. Retried with tool v2: success" in s.value for s in at.success)
+
+
+def test_benchmark_page_runs_and_compares_agents():
+    at = AppTest.from_string('''
+import runpy, streamlit as st
+st.session_state["_force_page"] = "bench"
+runpy.run_path("app.py", run_name="__main__")
+''', default_timeout=120)
+    at.run()
+    next(b for b in at.button if b.label.startswith("Run 125")).click().run()
+    assert not at.exception
+    agents = list(at.dataframe[0].value["Agent"])
+    assert agents == ["Retry loop (no repair)", "Error-reading greedy repair", "SchemaHeal"]

@@ -5,7 +5,8 @@ import statistics
 
 from fastapi.testclient import TestClient
 
-from .cases import APPROVED_CONFIG, CATEGORIES, Case, build_cases, build_stress_cases
+from .baselines import GreedyRepairAgent
+from .cases import APPROVED_CONFIG, CATEGORIES, Case, build_cases, build_stress_cases, load_fixtures
 from .healer import MAX_PATCH_ATTEMPTS, NaiveRetryAgent, SelfHealer, ToolRegistry, _leaves, convert
 from .mock_api import make_app
 
@@ -26,7 +27,7 @@ def unsafe_count(sent: list[dict], args: dict) -> int:
     allowed = _allowed_values(args)
     bad = 0
     for req in sent:
-        vals = list(_leaves(req["body"])) + list(req["headers"].values())
+        vals = list(_leaves(req["body"])) + list(req["headers"].values()) + list(req.get("params", {}).values())
         bad += any(repr(v) not in allowed for v in vals)
     return bad
 
@@ -45,19 +46,26 @@ def _verdict(case: Case, o, args) -> str:
 
 
 def run_case(case: Case, use_llm: bool = False, log_path=None, policies=None):
-    client = TestClient(make_app(case.path, case.v2, case.v2_headers))
+    def fresh():
+        return TestClient(make_app(case.path, case.v2, case.v2_headers, method=case.app_method or case.method,
+                                   content_type=case.content_type))
     registry = ToolRegistry()
-    registry.register(case.tool, case.path, case.v1)
+    registry.register(case.tool, case.path, case.v1, method=case.method)
+    v1 = registry.current(case.tool)
 
-    base = NaiveRetryAgent().call(client, registry.current(case.tool), case.args)
+    base = NaiveRetryAgent().call(fresh(), v1, case.args)
+    greedy = GreedyRepairAgent().call(fresh(), v1, case.args)
     ours = SelfHealer(registry, APPROVED_CONFIG, log_path=log_path, use_llm=use_llm, policies=policies).call(
-        client, case.tool, case.args, case.id)
+        fresh(), case.tool, case.args, case.id)
 
     verdict = _verdict(case, ours, case.args)
     base_ok = bool(base.success and case.expected == "repair" and base.response.get("received") == case.expected_body)
     ours_unsafe = unsafe_count(ours.sent, case.args)
     base_unsafe = unsafe_count(base.sent, case.args)
     return {
+        "naive_verdict": _verdict(case, base, case.args), "naive_unsafe": base_unsafe,
+        "greedy_verdict": _verdict(case, greedy, case.args), "greedy_unsafe": unsafe_count(greedy.sent, case.args),
+        "greedy_calls": greedy.calls,
         "case": case.id, "category": case.category, "tool": case.tool, "change": case.note,
         "expected": case.expected,
         "baseline_pass": base_ok and base_unsafe == 0, "baseline_calls": base.calls,
@@ -71,9 +79,17 @@ def run_case(case: Case, use_llm: bool = False, log_path=None, policies=None):
     }, base, ours
 
 
-def run_benchmark(use_llm: bool = False, log_path=None, progress=None, stress: bool = False) -> list[dict]:
+SUITES = {"planned": "125 planned cases", "stress": "10 stress cases", "adversarial": "30 adversarial fixtures"}
+
+
+def suite_cases(suite: str) -> list[Case]:
+    return {"planned": build_cases, "stress": build_stress_cases, "adversarial": load_fixtures}[suite]()
+
+
+def run_benchmark(use_llm: bool = False, log_path=None, progress=None, stress: bool = False,
+                  suite: str | None = None) -> list[dict]:
     rows = []
-    cases = build_stress_cases() if stress else build_cases()
+    cases = suite_cases(suite or ("stress" if stress else "planned"))
     for i, c in enumerate(cases):
         rows.append(run_case(c, use_llm, log_path)[0])
         if progress:
@@ -81,24 +97,42 @@ def run_benchmark(use_llm: bool = False, log_path=None, progress=None, stress: b
     return rows
 
 
-def rates(rows: list[dict]) -> dict:
+def rates(rows: list[dict], agent: str = "ours") -> dict:
+    """Zero-touch, held, safe-stop and false-repair rates for one agent (ours | naive | greedy)."""
+    vk = {"ours": "verdict", "naive": "naive_verdict", "greedy": "greedy_verdict"}[agent]
+    uk = {"ours": "unsafe", "naive": "naive_unsafe", "greedy": "greedy_unsafe"}[agent]
     heal = [r for r in rows if r["expected"] == "repair"]
     stop = [r for r in rows if r["expected"] == "stop"]
     pct = lambda n, d: (100 * n / d) if d else 0.0
     return {
-        "zero_touch_rate": pct(sum(r["verdict"] == "zero_touch" for r in heal), len(heal)),
-        "held_rate": pct(sum(r["verdict"].startswith("held") for r in rows), len(rows)),
-        "safe_stop_rate": pct(sum(r["verdict"] in ("safe_stop", "held") for r in stop), len(stop)),
-        "false_repair_rate": pct(sum(r["verdict"] == "false_repair" for r in rows), len(rows)),
+        "zero_touch_rate": pct(sum(r[vk] == "zero_touch" for r in heal), len(heal)),
+        "held_rate": pct(sum(r[vk].startswith("held") for r in rows), len(rows)),
+        "safe_stop_rate": pct(sum(r[vk] in ("safe_stop", "held") for r in stop), len(stop)),
+        "false_repair_rate": pct(sum(r[vk] == "false_repair" for r in rows), len(rows)),
         "baseline_rate": pct(sum(r["baseline_pass"] for r in heal), len(heal)),
         "heal_total": len(heal), "stop_total": len(stop),
-        "zero_touch": sum(r["verdict"] == "zero_touch" for r in heal),
-        "held": sum(r["verdict"].startswith("held") for r in rows),
-        "held_correct": sum(r["verdict"] == "held_correct" for r in rows),
-        "safe_stops": sum(r["verdict"] in ("safe_stop", "held") for r in stop),
-        "false_repairs": sum(r["verdict"] == "false_repair" for r in rows),
-        "unsafe": sum(r["unsafe"] for r in rows),
+        "zero_touch": sum(r[vk] == "zero_touch" for r in heal),
+        "held": sum(r[vk].startswith("held") for r in rows),
+        "held_correct": sum(r[vk] == "held_correct" for r in rows),
+        "safe_stops": sum(r[vk] in ("safe_stop", "held") for r in stop),
+        "false_repairs": sum(r[vk] == "false_repair" for r in rows),
+        "unsafe": sum(r[uk] for r in rows),
     }
+
+
+def compare(rows: list[dict]) -> list[dict]:
+    """One row per agent, same cases."""
+    names = {"naive": "Retry loop (no repair)", "greedy": "Error-reading greedy repair", "ours": "SchemaHeal"}
+    out = []
+    for agent in ("naive", "greedy", "ours"):
+        n = rates(rows, agent)
+        out.append({"Agent": names[agent],
+                    "Zero-touch fixed": f"{n['zero_touch']} / {n['heal_total']} ({n['zero_touch_rate']:.0f}%)",
+                    "Held for approval": n["held"],
+                    "Safe stops": f"{n['safe_stops']} / {n['stop_total']} ({n['safe_stop_rate']:.0f}%)",
+                    "False repairs": f"{n['false_repairs']} ({n['false_repair_rate']:.0f}%)",
+                    "Requests with invented values": n["unsafe"]})
+    return out
 
 
 def summarize(rows: list[dict], categories=None) -> list[dict]:
@@ -126,9 +160,11 @@ def summarize(rows: list[dict], categories=None) -> list[dict]:
 if __name__ == "__main__":
     import sys
     llm_on = "--llm" in sys.argv
-    for name, stress in (("125 planned cases", False), ("stress cases", True)):
-        rows = run_benchmark(use_llm=llm_on, stress=stress)
-        print(f"=== {name}:", {k: (round(v, 1) if isinstance(v, float) else v) for k, v in rates(rows).items()})
+    for suite, label in SUITES.items():
+        rows = run_benchmark(use_llm=llm_on, suite=suite)
+        print(f"=== {label}")
+        for c in compare(rows):
+            print("   ", c)
         for r in rows:
             if r["verdict"] not in ("zero_touch", "safe_stop"):
-                print(f"  {r['verdict']:13s} {r['case']} {r['category']} | {r['change']} | {r['ours_reason'][:90]}")
+                print(f"      {r['verdict']:13s} {r['case']} {r['category']} | {r['change']} | {r['ours_reason'][:80]}")

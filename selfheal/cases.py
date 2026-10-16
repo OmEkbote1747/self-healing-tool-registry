@@ -6,7 +6,9 @@ reach: "repair" (task should succeed) or "stop" (system must refuse and report).
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 
 # approved configuration the healer may read header values from
 from .security import demo_secret, get_secret
@@ -30,6 +32,9 @@ class Case:
     expected: str = "repair"            # "repair" | "stop"
     expected_body: dict | None = None   # what a correct repair sends
     note: str = ""
+    method: str = "POST"                # how the tool calls the API
+    app_method: str | None = None       # what the changed API accepts (None = same)
+    content_type: str = "application/json"
 
 
 # tool name, path, v1 schema, the agent's args
@@ -192,3 +197,12 @@ def build_stress_cases() -> list[Case]:
     return [Case(id=f"S{i + 1:02d}", category=cat, tool="tool", path="/endpoint", v1=v1, args=args, v2=v2,
                  v2_headers=h, expected=exp, expected_body=eb, note=note)
             for i, (cat, v1, args, v2, h, exp, eb, note) in enumerate(raw)]
+
+
+FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
+
+
+def load_fixtures(name: str = "adversarial") -> list[Case]:
+    """Cases stored as JSON, so independently sourced API changes can be added without code."""
+    data = json.loads((FIXTURES / f"{name}.json").read_text())
+    return [Case(**c) for c in data["cases"]]

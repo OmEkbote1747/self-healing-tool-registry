@@ -104,8 +104,14 @@ def test_failing_canary_is_rolled_back():
 
 
 def test_benchmark_has_no_false_repairs():
-    for stress in (False, True):
-        n = rates(run_benchmark(stress=stress))
-        assert n["false_repairs"] == 0 and n["unsafe"] == 0
-        assert n["safe_stop_rate"] == 100.0
+    for suite in ("planned", "stress", "adversarial"):
+        n = rates(run_benchmark(suite=suite))
+        assert n["false_repairs"] == 0 and n["unsafe"] == 0, suite
+        assert n["safe_stop_rate"] == 100.0, suite
     assert rates(run_benchmark())["zero_touch_rate"] > 90
+
+
+def test_greedy_baseline_makes_false_repairs():
+    # the stronger baseline recovers more often but sends wrong requests - that is the point of the comparison
+    n = rates(run_benchmark(suite="adversarial"), agent="greedy")
+    assert n["false_repairs"] > 0

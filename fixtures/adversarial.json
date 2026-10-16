@@ -1,0 +1,681 @@
+{
+ "description": "Adversarial schema-drift fixtures. Written by the SchemaHeal team, kept separate from the 125 planned cases. Contributions of independently sourced, real API changes in the same format are welcome.",
+ "cases": [
+  {
+   "id": "A01",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Ambiguous rename",
+   "v1": {
+    "sender_id": "str",
+    "receiver_id": "str"
+   },
+   "args": {
+    "sender_id": "u1",
+    "receiver_id": "u2"
+   },
+   "v2": {
+    "from": "str",
+    "to": "str"
+   },
+   "expected": "stop",
+   "note": "sender_id, receiver_id -> from, to (which is which?)"
+  },
+  {
+   "id": "A02",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Ambiguous rename",
+   "v1": {
+    "user_id": "str",
+    "text": "str"
+   },
+   "args": {
+    "user_id": "u1",
+    "text": "hi"
+   },
+   "v2": {
+    "owner_id": "str",
+    "text": "str"
+   },
+   "expected": "stop",
+   "note": "user_id -> owner_id (a different role)"
+  },
+  {
+   "id": "A03",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Ambiguous rename",
+   "v1": {
+    "start_date": "str",
+    "end_date": "str"
+   },
+   "args": {
+    "start_date": "2026-01-01",
+    "end_date": "2026-01-31"
+   },
+   "v2": {
+    "window_start": "str",
+    "window_end": "str"
+   },
+   "expected": "repair",
+   "expected_body": {
+    "window_start": "2026-01-01",
+    "window_end": "2026-01-31"
+   },
+   "note": "start_date/end_date -> window_start/window_end"
+  },
+  {
+   "id": "A04",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Ambiguous rename",
+   "v1": {
+    "phone": "str"
+   },
+   "args": {
+    "phone": "+91-98200"
+   },
+   "v2": {
+    "mobile": "str"
+   },
+   "expected": "repair",
+   "expected_body": {
+    "mobile": "+91-98200"
+   },
+   "note": "phone -> mobile (synonym, no shared words)"
+  },
+  {
+   "id": "A05",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Ambiguous rename",
+   "v1": {
+    "email": "str"
+   },
+   "args": {
+    "email": "a@x.io"
+   },
+   "v2": {
+    "contact_email": "str"
+   },
+   "expected": "repair",
+   "expected_body": {
+    "contact_email": "a@x.io"
+   },
+   "note": "email -> contact_email"
+  },
+  {
+   "id": "A06",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Unit change",
+   "v1": {
+    "payment_id": "str",
+    "amount": "str"
+   },
+   "args": {
+    "payment_id": "p1",
+    "amount": "20"
+   },
+   "v2": {
+    "payment_id": "str",
+    "amount_cents": "int"
+   },
+   "expected": "stop",
+   "note": "amount -> amount_cents"
+  },
+  {
+   "id": "A07",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Unit change",
+   "v1": {
+    "timeout_ms": "int"
+   },
+   "args": {
+    "timeout_ms": 5000
+   },
+   "v2": {
+    "timeout_seconds": "int"
+   },
+   "expected": "stop",
+   "note": "timeout_ms -> timeout_seconds"
+  },
+  {
+   "id": "A08",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Unit change",
+   "v1": {
+    "weight_kg": "float"
+   },
+   "args": {
+    "weight_kg": 2.5
+   },
+   "v2": {
+    "weight_grams": "float"
+   },
+   "expected": "stop",
+   "note": "weight_kg -> weight_grams"
+  },
+  {
+   "id": "A09",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Unit change",
+   "v1": {
+    "price": "float"
+   },
+   "args": {
+    "price": 499.0
+   },
+   "v2": {
+    "price_usd": "float"
+   },
+   "expected": "stop",
+   "note": "price -> price_usd (currency now explicit)"
+  },
+  {
+   "id": "A10",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Unit change",
+   "v1": {
+    "duration": "int"
+   },
+   "args": {
+    "duration": 90
+   },
+   "v2": {
+    "duration_minutes": "int"
+   },
+   "expected": "stop",
+   "note": "duration -> duration_minutes"
+  },
+  {
+   "id": "A11",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [
+    "authorization"
+   ],
+   "category": "Auth change",
+   "v1": {
+    "user_id": "str"
+   },
+   "args": {
+    "user_id": "7"
+   },
+   "v2": {
+    "user_id": "str"
+   },
+   "expected": "stop",
+   "note": "now requires an Authorization header"
+  },
+  {
+   "id": "A12",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [
+    "x-tenant-id"
+   ],
+   "category": "Auth change",
+   "v1": {
+    "user_id": "str"
+   },
+   "args": {
+    "user_id": "7"
+   },
+   "v2": {
+    "user_id": "str"
+   },
+   "expected": "stop",
+   "note": "now requires x-tenant-id (not in approved config)"
+  },
+  {
+   "id": "A13",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [
+    "x-api-key"
+   ],
+   "category": "Auth change",
+   "v1": {
+    "user_id": "str"
+   },
+   "args": {
+    "user_id": "7"
+   },
+   "v2": {
+    "user_id": "str"
+   },
+   "expected": "repair",
+   "expected_body": {
+    "user_id": "7"
+   },
+   "note": "now requires x-api-key (in approved config)"
+  },
+  {
+   "id": "A14",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Optional field",
+   "v1": {
+    "user_id": "str"
+   },
+   "args": {
+    "user_id": "7"
+   },
+   "v2": {
+    "userId": "str",
+    "note": "str?"
+   },
+   "expected": "repair",
+   "expected_body": {
+    "userId": "7",
+    "note": null
+   },
+   "note": "rename + new optional field"
+  },
+  {
+   "id": "A15",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Optional field",
+   "v1": {
+    "user_id": "str",
+    "nickname": "str"
+   },
+   "args": {
+    "user_id": "7",
+    "nickname": "ash"
+   },
+   "v2": {
+    "userId": "str",
+    "nickname": "str?"
+   },
+   "expected": "repair",
+   "expected_body": {
+    "userId": "7",
+    "nickname": "ash"
+   },
+   "note": "rename; nickname becomes optional"
+  },
+  {
+   "id": "A16",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Array",
+   "v1": {
+    "tags": "list[str]",
+    "user_id": "str"
+   },
+   "args": {
+    "tags": [
+     "a",
+     "b"
+    ],
+    "user_id": "7"
+   },
+   "v2": {
+    "item_tags": "list[str]",
+    "user_id": "str"
+   },
+   "expected": "repair",
+   "expected_body": {
+    "item_tags": [
+     "a",
+     "b"
+    ],
+    "user_id": "7"
+   },
+   "note": "tags -> item_tags (list)"
+  },
+  {
+   "id": "A17",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Array",
+   "v1": {
+    "tag": "str",
+    "user_id": "str"
+   },
+   "args": {
+    "tag": "vip",
+    "user_id": "7"
+   },
+   "v2": {
+    "tags": "list[str]",
+    "user_id": "str"
+   },
+   "expected": "stop",
+   "note": "tag (string) -> tags (list)"
+  },
+  {
+   "id": "A18",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Enum",
+   "v1": {
+    "user_id": "str",
+    "role": "str"
+   },
+   "args": {
+    "user_id": "7",
+    "role": "member"
+   },
+   "v2": {
+    "user_id": "str",
+    "access_role": "enum[admin|member]"
+   },
+   "expected": "repair",
+   "expected_body": {
+    "user_id": "7",
+    "access_role": "member"
+   },
+   "note": "role -> access_role, value allowed"
+  },
+  {
+   "id": "A19",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Enum",
+   "v1": {
+    "user_id": "str",
+    "role": "str"
+   },
+   "args": {
+    "user_id": "7",
+    "role": "guest"
+   },
+   "v2": {
+    "user_id": "str",
+    "access_role": "enum[admin|member]"
+   },
+   "expected": "stop",
+   "note": "role -> access_role, value not allowed"
+  },
+  {
+   "id": "A20",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Enum",
+   "v1": {
+    "status": "str"
+   },
+   "args": {
+    "status": "archived"
+   },
+   "v2": {
+    "status": "enum[active|inactive]"
+   },
+   "expected": "stop",
+   "note": "status narrowed to an enum without 'archived'"
+  },
+  {
+   "id": "A21",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Format",
+   "v1": {
+    "date": "str"
+   },
+   "args": {
+    "date": "2026-10-20"
+   },
+   "v2": {
+    "booking_date": "date"
+   },
+   "expected": "repair",
+   "expected_body": {
+    "booking_date": "2026-10-20"
+   },
+   "note": "date -> booking_date (ISO)"
+  },
+  {
+   "id": "A22",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Format",
+   "v1": {
+    "date": "str"
+   },
+   "args": {
+    "date": "20/10/2026"
+   },
+   "v2": {
+    "booking_date": "date"
+   },
+   "expected": "stop",
+   "note": "date -> booking_date, value not ISO"
+  },
+  {
+   "id": "A23",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Type",
+   "v1": {
+    "sku": "str",
+    "quantity": "str"
+   },
+   "args": {
+    "sku": "S1",
+    "quantity": "3"
+   },
+   "v2": {
+    "sku": "str",
+    "quantity": "int"
+   },
+   "expected": "repair",
+   "expected_body": {
+    "sku": "S1",
+    "quantity": 3
+   },
+   "note": "\"3\" -> int"
+  },
+  {
+   "id": "A24",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Type",
+   "v1": {
+    "sku": "str",
+    "quantity": "str"
+   },
+   "args": {
+    "sku": "S1",
+    "quantity": "3.5"
+   },
+   "v2": {
+    "sku": "str",
+    "quantity": "int"
+   },
+   "expected": "stop",
+   "note": "\"3.5\" -> int would lose data"
+  },
+  {
+   "id": "A25",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Type",
+   "v1": {
+    "user_id": "str",
+    "active": "str"
+   },
+   "args": {
+    "user_id": "7",
+    "active": "yes"
+   },
+   "v2": {
+    "user_id": "str",
+    "active": "bool"
+   },
+   "expected": "stop",
+   "note": "\"yes\" -> bool is a guess"
+  },
+  {
+   "id": "A26",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Method / format",
+   "v1": {
+    "user_id": "str"
+   },
+   "args": {
+    "user_id": "7"
+   },
+   "v2": {
+    "user_id": "str"
+   },
+   "app_method": "PUT",
+   "expected": "stop",
+   "note": "POST -> PUT"
+  },
+  {
+   "id": "A27",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Method / format",
+   "v1": {
+    "user_id": "str"
+   },
+   "args": {
+    "user_id": "7"
+   },
+   "v2": {
+    "user_id": "str"
+   },
+   "content_type": "application/x-www-form-urlencoded",
+   "expected": "stop",
+   "note": "JSON -> form body"
+  },
+  {
+   "id": "A28",
+   "tool": "tool",
+   "path": "/orders",
+   "method": "GET",
+   "v2_headers": [],
+   "category": "Query param",
+   "v1": {
+    "q:order_id": "str"
+   },
+   "args": {
+    "order_id": "A-1"
+   },
+   "v2": {
+    "q:orderId": "str"
+   },
+   "expected": "repair",
+   "expected_body": {
+    "query": {
+     "orderId": "A-1"
+    }
+   },
+   "note": "GET ?order_id -> ?orderId"
+  },
+  {
+   "id": "A29",
+   "tool": "tool",
+   "path": "/orders",
+   "method": "GET",
+   "v2_headers": [],
+   "category": "Query param",
+   "v1": {
+    "q:limit": "int"
+   },
+   "args": {
+    "limit": 10
+   },
+   "v2": {
+    "q:page_size": "int"
+   },
+   "expected": "repair",
+   "expected_body": {
+    "query": {
+     "page_size": 10
+    }
+   },
+   "note": "GET ?limit -> ?page_size"
+  },
+  {
+   "id": "A30",
+   "tool": "tool",
+   "path": "/endpoint",
+   "method": "POST",
+   "v2_headers": [],
+   "category": "Nesting",
+   "v1": {
+    "name": "str",
+    "email": "str"
+   },
+   "args": {
+    "name": "Asha",
+    "email": "a@x.io"
+   },
+   "v2": {
+    "customer.name": "str",
+    "customer.email": "str"
+   },
+   "expected": "repair",
+   "expected_body": {
+    "customer": {
+     "name": "Asha",
+     "email": "a@x.io"
+    }
+   },
+   "note": "name, email -> customer.{name,email}"
+  }
+ ]
+}
