@@ -4,7 +4,8 @@ from pathlib import Path
 import pytest
 from streamlit.testing.v1 import AppTest
 
-PAGES = ["overview", "tools", "drift", "recovery", "audit", "chaos", "health"]
+PAGES = ["overview", "monitoring", "tools", "drift", "recovery", "audit", "chaos", "sim_records", "sim_eval",
+         "sim_tools", "sim_drift", "health"]
 
 
 @pytest.fixture(autouse=True)
@@ -38,9 +39,9 @@ def test_chaos_run_then_pages_show_records():
     at = _page("chaos")
     at.button[0].click().run()          # "Run scenario" (baseline vs ADAPTIX)
     assert not at.exception, at.exception
-    assert "chaos_last" in at.session_state and len(at.session_state["chaos_last"]) == 2
+    assert "chaos_last" in at.session_state and len(at.session_state["chaos_last"][1]) == 2
     assert any("SIMULATED" in m.value for m in at.markdown)
-    for page in ["overview", "tools", "drift", "recovery", "audit"]:
+    for page in ["overview", "sim_records", "sim_eval", "sim_tools", "sim_drift"]:
         at.session_state["_force_page"] = page
         at.run()
         assert not at.exception, (page, at.exception)

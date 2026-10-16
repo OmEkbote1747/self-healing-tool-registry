@@ -73,6 +73,15 @@ class Storage:
             r = c.execute("SELECT value FROM meta WHERE key='mode'").fetchone()
             if r is None:
                 c.execute("INSERT INTO meta VALUES ('mode', ?)", (mode,))
+                if mode == "production":          # legacy single-database file: drop old simulated records
+                    sim_tools = [json.loads(x["spec"])["name"] for x in c.execute("SELECT spec FROM tools")
+                                 if json.loads(x["spec"]).get("simulated")]
+                    for n in sim_tools:
+                        for t in ("versions", "mappings", "locks"):
+                            c.execute(f"DELETE FROM {t} WHERE tool=?", (n,))
+                        c.execute("DELETE FROM tools WHERE name=?", (n,))
+                    for t in ("incidents", "events", "executions"):
+                        c.execute(f"DELETE FROM {t} WHERE simulated=1")
             elif r["value"] != mode:
                 raise IsolationError(f"{self.path} is a {r['value']} database; refusing to open it as {mode}")
 

@@ -1,65 +1,77 @@
+"""Integration Health: Gemini and every external API, with honest statuses."""
 import streamlit as st
 
 from views.common import api, api_mode, badge, header, safe_call
 
-CONN = {"verified": ("Verified (a real request succeeded)", "#047857"),
-        "configured_unverified": ("Configured, not yet verified", "#B45309"),
-        "failing": ("Configured, last request failed", "#B91C1C"),
-        "not_configured": ("Not configured", "#475569"), "mock": ("Mock (no real model)", "#6D28D9")}
+
+def _row(label: str, item: dict):
+    c1, c2 = st.columns([1.2, 3])
+    c1.markdown(f"**{label}**")
+    c2.markdown(f"{badge(item['status'])} &nbsp; {item.get('detail', '')}", unsafe_allow_html=True)
 
 
 def render():
-    header("System Health", "Service, LLM provider and credentials",
-           "Credential values never leave the server. This page shows aliases, groups and states only.")
+    header("Integration Health", "Gemini and external APIs",
+           "Each status comes from recorded evidence. VERIFIED means a real request succeeded; a configured secret "
+           "alone is only CONFIGURED. Key values, authorization headers and payloads are never shown.")
+    rep = safe_call(api, "GET", "/api/integrations")
     h = safe_call(api, "GET", "/api/health")
-    if h is None:
+    if rep is None or h is None:
         return
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Service", h["status"])
-    c2.metric("Database", "ok" if h["database"] == "ok" else "error")
-    c3.metric("Version", h["version"])
-    c4.metric("API", api_mode())
-    llm = h["llm"]
-    st.subheader("LLM provider")
-    label, colour = CONN.get(llm["connectivity"], (llm["connectivity"], "#475569"))
-    st.markdown(f"Provider `{llm['provider']}` · model `{llm['model']}` · "
-                f"<b style='color:{colour}'>{label}</b>", unsafe_allow_html=True)
-    if llm.get("note"):
-        st.caption(llm["note"])
-    if llm.get("last_success_at"):
-        st.caption(f"Last successful request: {llm['last_success_at'][:19]}Z")
-    if llm.get("last_error_category"):
-        st.caption(f"Last error category: {llm['last_error_category']}")
-    if llm["configured"] and llm["provider"] not in ("none",) and llm["connectivity"] != "mock":
-        if st.button("Run connectivity check", icon=":material/network_check:",
-                     help="Sends one minimal real request to the provider"):
-            with st.spinner("Calling the provider…"):
+    st.subheader("Modes")
+    m = rep["mode"]
+    c1, c2 = st.columns(2)
+    with c1.container(border=True):
+        st.markdown(f"**Production** {badge('YES')}", unsafe_allow_html=True)
+        st.caption(f"database `{m['production']['database']}` · {m['production']['upstreams']} · "
+                   f"LLM `{m['production']['llm']}` · API {api_mode()}")
+    with c2.container(border=True):
+        st.markdown("**Simulation Lab** (separate)")
+        st.caption(f"database `{m['simulation']['database']}` · {m['simulation']['upstreams']} · {m['simulation']['llm']}")
+
+    g = rep["gemini"]
+    st.subheader(f"Google Gemini · `{g['model']}`")
+    _row("SDK installed", g["sdk"])
+    _row("Credentials", g["credentials"])
+    _row("Real request", g["real_request"])
+    _row("Used by the repair pipeline", g["pipeline"])
+    if g["credentials"]["status"] == "CONFIGURED":
+        if st.button("Send a real test request to Gemini", icon=":material/network_check:",
+                     help="One minimal request (a few tokens) using the configured key"):
+            with st.spinner("Calling Gemini…"):
                 r = safe_call(api, "POST", "/api/health/llm-check")
             if r:
                 st.session_state["llm_check"] = r["result"]
-                st.rerun()                      # redraw the status, sidebar and credential states
+                st.rerun()
         res = st.session_state.get("llm_check")
         if res:
             (st.success if res["ok"] else st.error)(
-                f"Last check {res['ts'][11:19]}Z · {'succeeded' if res['ok'] else 'failed'}: "
+                f"Last check {res['ts'][11:19]}Z: {'succeeded' if res['ok'] else 'failed'} · "
                 f"{res.get('error_category') or 'ok'} · {res.get('duration_ms')} ms · "
                 f"credential {res.get('credential_alias') or '—'}")
-    else:
-        st.info("No LLM provider is configured, so no connectivity check is offered. Set GEMINI_API_KEY on the "
-                "server to enable the Gemini tier. Without it, repairs the rules cannot ground stop safely.",
-                icon=":material/info:")
-    st.subheader("Credential registry")
-    creds = h["credentials"]
-    if creds:
-        st.dataframe([{"alias": c["alias"], "group": c["group"], "provider": c["provider"], "header": c["header"],
-                       "scope": c["scope"], "configured": c["configured"], "enabled": c["enabled"], "state": c["state"],
-                       "simulated": c["simulated"], "last failure": c["last_failure_category"],
-                       "fails over on": ", ".join(c["failover_on"])} for c in creds],
-                     hide_index=True, use_container_width=True)
-    else:
-        st.caption("No credentials configured.")
-    st.caption("Failover moves to another authorised credential in the same group only for the categories listed. "
+
+    ext = rep["external"]
+    st.subheader("External APIs")
+    _row("Approved hosts", ext["allowed_hosts"])
+    if not ext["apis"]:
+        st.info("No real API is registered. Use Real API Monitoring to add one.", icon=":material/info:")
+    for a in ext["apis"]:
+        with st.container(border=True):
+            st.markdown(f"**{a['provider']}** · `{a['tool']}` · `{a['endpoint']}`")
+            _row("Host approved", a["host_allowed"])
+            _row("Credentials", a["credentials"])
+            _row("Connectivity", a["connectivity"])
+            _row("Schema discovery", a["schema_discovery"])
+            _row("Used by the repair pipeline", a["pipeline"])
+            st.caption("Last successful check: " + (a["last_successful_check"][:19] + " UTC"
+                                                     if a["last_successful_check"] else "none yet"))
+
+    st.subheader("Credential registry (production)")
+    st.dataframe([{"alias": c["alias"], "group": c["group"], "provider": c["provider"], "header": c["header"],
+                   "configured": c["configured"] and c["state"] != "missing", "state": c["state"],
+                   "last failure": c["last_failure_category"], "fails over on": ", ".join(c["failover_on"])}
+                  for c in h["credentials"]], hide_index=True, use_container_width=True)
+    st.caption("Failover moves only to another authorized credential in the same group, for the listed categories. "
                "A rejected key is never modified, and an authentication error is never treated as schema drift.")
     st.subheader("Limits")
-    st.json(h["limits"])
-    st.markdown(badge("healthy" if h["status"] == "ok" else "degraded"), unsafe_allow_html=True)
+    st.json(h["limits"] | {"scheduler": h["monitor"]})

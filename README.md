@@ -48,13 +48,17 @@ What is never treated as schema drift: 401/403 (credential problems; failover on
 | `adaptix/llm/mock.py` | deterministic **mock**, used only in tests and always labelled "mock (not a real model)" |
 | `adaptix/credentials.py` | credential registry: aliases, groups, scopes, states, authorised failover |
 | `adaptix/security.py` | redaction and secret scrubbing for logs, audit payloads, errors and prompts |
-| `adaptix/storage.py` | SQLite (WAL): tools, versions, schema snapshots, incidents, events, executions, mappings, locks |
-| `adaptix/verify.py`, `adaptix/upstreams.py` | task verification; pooled HTTP client and in-process simulated upstreams |
-| `adaptix/api.py` | FastAPI backend (`/api/*`, OpenAI-compatible adapter), admin auth, CORS, size limits |
-| `adaptix/simulation.py`, `adaptix/mock_api.py` | Chaos Lab: 19 drift/failure scenarios against simulated APIs |
-| `adaptix/evaluation.py`, `adaptix/cases.py`, `fixtures/` | baseline vs ADAPTIX: 19 scenarios, 125 planned cases, 30 adversarial fixtures |
+| `adaptix/storage.py` | SQLite (WAL) per world: tools, versions, schema snapshots, incidents, events, executions, mappings, locks, monitoring checks; refuses records from the other world |
+| `adaptix/netguard.py` | SSRF guard for real egress: approved hosts, https, public IPs only, metadata blocked, DNS pinning with verified TLS, redirect re-validation, per-host pacing, Retry-After cooldown |
+| `adaptix/upstreams.py` | production = guarded real providers only; simulation = in-process `sim://` only |
+| `adaptix/monitor.py` | Real API Monitoring: scheduled and on-demand schema checks, GET probes through the full pipeline |
+| `adaptix/integrations.py` | Integration Health statuses (VERIFIED only from recorded real requests) |
+| `adaptix/verify.py` | task verification (status/echo outputs, or the authoritative response schema for read operations) |
+| `adaptix/api.py` | FastAPI backend: production `/api/*`, simulation `/api/sim/*`, monitoring, integrations, OpenAI adapter |
+| `adaptix/simulation.py`, `adaptix/mock_api.py` | Simulation Lab: 21 drift/failure scenarios against isolated simulated APIs |
+| `adaptix/evaluation.py`, `adaptix/cases.py`, `fixtures/` | baseline vs ADAPTIX: 21 scenarios, 125 planned cases, 30 adversarial fixtures |
 | `adaptix/metrics.py` | dashboard metrics computed only from stored records |
-| `app.py`, `views/` | Streamlit dashboard: Overview, Tool Registry, Schema Drift Explorer, Recovery Center, Audit & Evaluation, Chaos Lab, System Health |
+| `app.py`, `views/` | Streamlit dashboard. Production: Overview, Real API Monitoring, Tool Registry, Schema Drift Explorer, Recovery Center, Production Audit. Simulation Lab: Lab, Records, Evaluation, Tools, Drift. System: Integration Health |
 | `tests/` | pytest suite (see below) |
 
 ## Run it
@@ -83,9 +87,47 @@ To point the dashboard at a separately deployed API, set `ADAPTIX_API_URL` and `
 | `POST /api/repair/execute` | run a tool call through the pipeline |
 | `POST /api/repair/analyze` | diagnose and plan **without sending anything** |
 | `GET /api/incidents[/{id}]`, `GET /api/audit`, `GET /api/metrics` | records, audit log, metrics |
-| `GET/POST /api/simulations`, `POST /api/simulations/reset` | Chaos Lab (simulated data only) |
-| `POST /api/evaluation`, `GET /api/evaluation/latest` | baseline vs ADAPTIX evaluation |
+| `GET /api/monitor`, `POST /api/monitor/{name}/check`, `PUT /api/monitor/{name}`, `GET /api/monitor/{name}/checks` | Real API Monitoring: overview, Check now, schedule, history |
+| `GET /api/integrations` | Integration Health report |
+| `GET /api/sim/tools…`, `/api/sim/incidents…`, `/api/sim/audit`, `/api/sim/metrics` | the same read routes for the **simulation** database |
+| `GET/POST /api/simulations`, `POST /api/simulations/reset` | Simulation Lab runs (`llm`: `none` / `mock` / `gemini`) |
+| `POST /api/evaluation`, `GET /api/evaluation/latest` | baseline vs ADAPTIX evaluation (simulation database) |
 | `GET /v1/openai/tools`, `POST /v1/openai/tool_calls` | OpenAI-compatible tool calling (see `examples/openai_agent_loop.py`) |
+
+## Real API Monitoring
+
+Register a genuine HTTPS API on the **Real API Monitoring** page (or `POST /api/tools`). Each registration needs:
+
+- the provider and endpoint;
+- the schema source: an OpenAPI or JSON Schema URL, or "none";
+- optionally, a credential group and a safe **read-only probe** (GET tools only).
+
+Each check, run on a schedule or with **Check now**:
+
+1. **Fetches the authoritative schema** through the SSRF guard.
+2. **Compares it with the schema saved for the active version.** With no change, it reports "No schema drift detected". Nothing is invented.
+3. **Runs the probe through the full pipeline**, if the tool has one. A call broken by confirmed drift is diagnosed, repaired, validated, retried, verified, and rolled back if verification fails. A call that still works shows the drift does not break that task.
+4. **Stores the result:** connectivity, schema status, the changes, verification, and any incident and repair.
+
+Rules:
+
+- **Only approved hosts.** Hosts must be listed in `ADAPTIX_ALLOWED_HOSTS`. Private, loopback, link-local and metadata addresses are always refused, as are redirects to them.
+- **Polite to providers.** The minimum interval is 5 minutes, there is at most one request per host per second, and a 429's Retry-After is honoured.
+- **Errors are not drift.** Authentication, authorization, quota, network, TLS and business-rule failures are reported with their category and never repaired as schema drift. A rejected key is never altered.
+- **Providers without a schema** are registered with declared fields. These are *not* authoritative: drift cannot be verified, the tool is never repaired, and the page says so.
+
+## Simulation Lab and data separation
+
+- **Separate in every layer.** Simulations use their own database (`ADAPTIX_SIM_DB_PATH`), their own credential registry with throwaway keys, and in-process `sim://` APIs only.
+- **Enforced in the backend:**
+  - each database records its mode, and every write is checked against it;
+  - production upstreams refuse `sim://`, and simulation upstreams refuse real URLs;
+  - production refuses simulated tools;
+  - the production engine never accepts the mock LLM, and `LLM_PROVIDER=mock` means no LLM there;
+  - simulations refuse to run on the production engine.
+- **Choosing the LLM per run:** rules only (the default, deterministic), the **mock** (labelled "MOCK (not a real model)"), or **real Gemini** (labelled "REAL Gemini request"; only offered when a key is configured).
+- **What each run shows:** the original and changed schema, detected drift, proposed repair, validation checks, retry, verification and rollback.
+- **Honest outcomes:** stopping safely is the correct result in many scenarios, and a mismatch with the expected outcome is reported as one.
 
 ## Configuration
 
@@ -102,7 +144,10 @@ See [.env.example](.env.example) for every variable. The main ones:
 | `ADAPTIX_ADMIN_TOKEN` | random per process | bearer token for `/api/*` |
 | `ADAPTIX_CORS_ORIGINS` | empty (CORS off) | comma-separated allowed origins |
 | `ADAPTIX_MAX_BODY_BYTES` | 256000 | larger requests are rejected with 413 |
-| `ADAPTIX_DB_PATH`, `ADAPTIX_RETENTION_DAYS` | `data/adaptix.db`, 30 | storage and retention |
+| `ADAPTIX_DB_PATH`, `ADAPTIX_SIM_DB_PATH`, `ADAPTIX_RETENTION_DAYS` | `data/adaptix.db`, `data/adaptix-sim.db`, 30 | production and simulation databases (must differ), retention |
+| `ADAPTIX_ALLOWED_HOSTS` | empty (no real egress) | hosts you are authorized to call, e.g. `petstore3.swagger.io` or `*.example.com` |
+| `ADAPTIX_MONITOR_INTERVAL_SECONDS`, `ADAPTIX_MONITOR_ENABLED` | 3600, true | default schema-check interval (min 300) and the scheduler switch |
+| `ADAPTIX_HOST_MIN_INTERVAL_SECONDS`, `ADAPTIX_ALLOW_HTTP` | 1, false | per-host pacing; plain http only if explicitly enabled |
 
 On Streamlit Cloud, put these under the app's **Secrets**. `config.env()` reads environment variables first, then `st.secrets`.
 
@@ -129,9 +174,9 @@ Without an LLM key:
 
 | Suite | Cases | Recovered (repairable) | Safe stop (unrepairable) | Incorrect patches accepted | Median recovery |
 |---|---|---|---|---|---|
-| Chaos Lab scenarios | 19 | 8 / 8 (100%) | 10 / 10 (100%) | 0 | 6.7 ms |
+| Simulation Lab scenarios | 21 | 9 / 9 (100%) | 11 / 11 (100%), plus 1 expected rollback | 0 | 7.1 ms |
 | Planned schema changes | 125 | 79 / 85 (92.9%) | 40 / 40 (100%) | 0 | 6.7 ms |
-| Adversarial fixtures | 30 | 10 / 13 (76.9%) | 17 / 17 (100%) | 0 | 6.7 ms |
+| Adversarial fixtures | 30 | 10 / 13 (76.9%) | 17 / 17 (100%) | 0 | 7.0 ms |
 
 With a **real Gemini key** (`gemini-3.5-flash-lite`, run on 2026-10-16):
 
@@ -142,17 +187,19 @@ The repairable cases ADAPTIX did not recover are **safe misses**: it stopped ins
 
 ## Tests
 
-`python -m pytest -q` → 127 passed. The 2 live Gemini tests in `tests/test_gemini_live.py` are skipped without `GEMINI_API_KEY`; with a real key they passed on 2026-10-16. The suite covers:
+`python -m pytest -q` → 188 passed, 4 skipped on 2026-10-16. The skipped tests are live tests:
 
-- every Chaos Lab scenario, plus baseline mode;
-- classification, including that auth errors are never repaired;
-- that a plain success creates no incident;
-- side effects and idempotency, Retry-After handling and the time budget;
-- that a 503 is not replayed for non-idempotent calls;
-- loop prevention, concurrency, rollback, and response-drift repair without resending;
-- the validator, transforms, credential failover, and the Gemini adapter (fake client and real SDK error types);
-- the API: auth, 413, CORS, analyze-without-sending, the OpenAI adapter, and no secret leakage;
-- smoke tests for every dashboard page.
+- **`tests/test_gemini_live.py`** needs `GEMINI_API_KEY`. It passed on 2026-10-16 with a real key.
+- **`tests/test_live_api.py`** needs `ADAPTIX_LIVE_API_TESTS=1` and makes read-only calls to the public Swagger Petstore through the real guard. It passed on 2026-10-16.
+
+The suite covers:
+
+- **Simulation Lab:** every scenario plus baseline mode, repeatability (same seed, same result) and LLM labelling (mock vs real).
+- **Separation:** each store refuses the other world's records, upstreams refuse the wrong world, production never uses the mock, legacy mixed databases are cleaned.
+- **Real-mode monitoring** (with a test-only fake transport, `tests/fakes.py`): no-drift results, drift with and without a probe, autonomous repair and verification, rollback, unsupported repairs stopping, auth / business-rule / network failures never treated as drift, unavailable schemas failing closed, schema-less providers, probe and interval rules, the scheduler.
+- **SSRF guard:** the allowlist, private/loopback/metadata/IPv4-mapped addresses, IP literals, schemes, credentials in URLs, DNS pinning, redirect re-validation, write requests never redirected, the Retry-After cooldown, pacing, TLS on.
+- **Classification, validation and transport:** classification, the validator (including "no caller value silently dropped"), transforms, credential failover, the Gemini adapter, and the API (auth, 413, CORS, analyze-without-sending, the OpenAI adapter, no secret leakage).
+- **Dashboard:** smoke tests for all 12 pages.
 
 ## Limitations
 
@@ -160,5 +207,7 @@ The repairable cases ADAPTIX did not recover are **safe misses**: it stopped ins
 - Real Gemini calls were verified on 2026-10-16. Google can return `503 high demand` for a model; ADAPTIX retries a bounded number of times and otherwise stops safely.
 - Name similarity and documentation cannot prove two fields mean the same thing. When the evidence is not explicit, ADAPTIX stops.
 - SQLite suits one host. Multiple instances need a shared database and a distributed lock. Credential state is in memory.
-- On Streamlit Cloud the SQLite file is ephemeral, so records reset when the app restarts.
+- On Streamlit Cloud the SQLite files are ephemeral, so records (including monitoring history) reset when the app restarts, and the scheduler only runs while the app is awake.
+- A monitoring probe verifies a read operation by checking the response against the provider's own schema. That proves the shape of the result, not its business meaning.
+- Drift detection relies on the provider's published schema being accurate; an undocumented change is only caught when it breaks a real call.
 - Not yet covered: auth-scheme migrations, `oneOf` discriminators, non-JSON payloads and pagination changes.

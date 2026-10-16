@@ -14,21 +14,25 @@ ROWS = [("Accuracy (outcome as expected)", "accuracy", fmt_pct),
         ("Recoveries under 4 s", "under_4s_rate", fmt_pct),
         ("Mean retries", "mean_retries", str),
         ("Rollbacks", "rollbacks", str),
+        ("LLM calls", "llm_calls", str),
+        ("of which real LLM requests", "real_llm_calls", str),
         ("LLM tokens", "tokens", str)]
 
 
 def _evaluation():
     st.markdown("Runs every case twice against simulated upstreams: once as a **baseline** (no repair: the call "
                 "simply fails) and once with **ADAPTIX**. Expected outcomes are fixed before the run.")
-    c1, c2, c3 = st.columns([1.4, .6, 1])
+    c1, c2, c4, c3 = st.columns([1.4, .6, 1.4, 1])
     suites = {"scenarios": "Chaos Lab scenarios (19)", "planned": "Planned schema changes (125)",
               "adversarial": "Adversarial fixtures (30)"}
     suite = c1.selectbox("Suite", list(suites), format_func=suites.get)
     seed = c2.number_input("Seed", 0, 10_000, 7)
+    llm_opts = {"none": "Rules only", "mock": "Mock LLM (not real)", "gemini": "Real Gemini"}
+    llm = c4.selectbox("LLM planner", list(llm_opts), format_func=llm_opts.get, key="eval_llm")
     c3.write("")
     if c3.button("Run evaluation", type="primary", icon=":material/play_arrow:"):
         with st.spinner("Running both modes against simulated upstreams…"):
-            res = safe_call(api, "POST", "/api/evaluation", json={"suite": suite, "seed": int(seed)})
+            res = safe_call(api, "POST", "/api/evaluation", json={"suite": suite, "seed": int(seed), "llm": llm})
         if res:
             st.session_state["eval"] = res
     res = st.session_state.get("eval")
@@ -42,8 +46,9 @@ def _evaluation():
         st.info("No evaluation has been run yet.")
         return
     st.markdown(f"{SIM_BADGE} &nbsp; **{res['label']}** · {res['cases']} cases · seed {res['seed']} · "
-                f"LLM: `{res['llm']}`" + (" (real provider)" if res["llm_real"] else " (no real model called)")
-                + f" · {res['duration_s']} s", unsafe_allow_html=True)
+                f"LLM planner: `{res['llm']}` · real LLM requests: {res['summary']['adaptix'].get('real_llm_calls', 0)}"
+                f" of {res['summary']['adaptix'].get('llm_calls', 0)} LLM calls · {res['duration_s']} s",
+                unsafe_allow_html=True)
     b, a = res["summary"]["baseline"], res["summary"]["adaptix"]
     kpis([("Recovery success", fmt_pct(a["recovery_success_rate"]), f"baseline {fmt_pct(b['recovery_success_rate'])}"),
           ("Safe stop", fmt_pct(a["safe_stop_rate"]), f"{a['should_stop']} unrepairable cases"),
@@ -64,19 +69,16 @@ def _evaluation():
                            "text/csv", icon=":material/download:")
 
 
-def _audit():
-    c1, c2, c3 = st.columns(3)
-    kind = c1.text_input("Event kind", placeholder="repair_applied")
-    tool = c2.text_input("Tool")
-    src = c3.selectbox("Source", ["all", "real traffic", "simulated"])
+def _audit(prefix: str):
+    c1, c2 = st.columns(2)
+    kind = c1.text_input("Event kind", placeholder="schema_check", key=f"kind{prefix}")
+    tool = c2.text_input("Tool", key=f"tool{prefix}")
     params = {"limit": 500}
     if kind:
         params["kind"] = kind
     if tool:
         params["tool"] = tool
-    if src != "all":
-        params["simulated"] = src == "simulated"
-    ev = safe_call(api, "GET", "/api/audit", params=params)
+    ev = safe_call(api, "GET", f"{prefix}/audit", params=params)
     if ev is None:
         return
     if not ev:
@@ -90,10 +92,8 @@ def _audit():
     st.json(ev[pick]["data"])
 
 
-def _metrics():
-    scope = st.radio("Scope", ["all", "real traffic", "simulated"], horizontal=True)
-    params = {} if scope == "all" else {"simulated": scope == "simulated"}
-    m = safe_call(api, "GET", "/api/metrics", params=params)
+def _metrics(prefix: str):
+    m = safe_call(api, "GET", f"{prefix}/metrics")
     if m is None:
         return
     s = m["sample"]
@@ -112,13 +112,24 @@ def _metrics():
         st.dataframe(pd.DataFrame(m["per_tool"]).T.fillna(0).astype(int), use_container_width=True)
 
 
-def render():
-    header("Audit & Evaluation", "Evidence, not claims",
-           "The baseline-versus-ADAPTIX evaluation, metrics computed from stored records, and the full audit log.")
-    t1, t2, t3 = st.tabs(["Evaluation", "Metrics", "Audit log"])
-    with t1:
-        _evaluation()
+def render(prefix: str = "/api"):
+    if prefix == "/api/sim":
+        header("Simulation Evaluation", "Baseline vs ADAPTIX on simulated suites",
+               "Deterministic suites against isolated simulated APIs, plus the simulation metrics and audit log. "
+               "Nothing here is production data.")
+        st.markdown(f"{SIM_BADGE} &nbsp; Simulation database only.", unsafe_allow_html=True)
+        t1, t2, t3 = st.tabs(["Evaluation", "Metrics", "Audit log"])
+        with t1:
+            _evaluation()
+        with t2:
+            _metrics(prefix)
+        with t3:
+            _audit(prefix)
+        return
+    header("Production Audit", "Evidence from real API traffic",
+           "Metrics computed from production records only (real providers), and the production audit log.")
+    t2, t3 = st.tabs(["Metrics", "Audit log"])
     with t2:
-        _metrics()
+        _metrics(prefix)
     with t3:
-        _audit()
+        _audit(prefix)

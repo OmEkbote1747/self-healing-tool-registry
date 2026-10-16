@@ -47,25 +47,32 @@ def _side(title, side, other):
                  column_config={"state": st.column_config.TextColumn(width="small")})
 
 
-def render():
-    header("Schema Drift Explorer", "What changed, field by field",
+def render(prefix: str = "/api"):
+    sim = prefix == "/api/sim"
+    header("Simulation Lab · Drift" if sim else "Schema Drift Explorer", "What changed, field by field",
            "The registered schema next to the live authoritative schema, with each change explained. For an "
            "incident, the repair ADAPTIX selected and why.")
-    tools = safe_call(api, "GET", "/api/tools")
+    tools = safe_call(api, "GET", f"{prefix}/tools")
     if tools is None:
         return
     if not tools:
-        empty("No tools registered yet.", "Open the Chaos Lab", "chaos")
+        empty("No tools registered yet.", "Open the Simulation Lab" if sim else "Open Real API Monitoring",
+              "chaos" if sim else "monitoring")
         return
     names = [t["name"] for t in tools]
     tab_live, tab_inc = st.tabs(["Live comparison", "Drift in an incident"])
     with tab_live:
         sel = st.selectbox("Tool", names, index=names.index(st.session_state["tool"]) if st.session_state.get("tool") in names else 0)
-        d = safe_call(api, "GET", f"/api/tools/{sel}/drift")
+        d = safe_call(api, "GET", f"{prefix}/tools/{sel}/drift")
         if d is None:
             return
         if not d["available"]:
-            st.warning("The authoritative schema could not be fetched, so ADAPTIX will not repair this tool (fail closed).")
+            if d.get("status") == "unsupported":
+                st.info("This provider publishes no machine-readable schema, so drift cannot be verified and the "
+                        "tool is never repaired automatically.")
+            else:
+                st.warning(f"The authoritative schema could not be fetched ({d.get('error_category')}), so ADAPTIX "
+                           "will not repair this tool (fail closed).")
         else:
             rep = d["report"]
             sim = next(t for t in tools if t["name"] == sel)["simulated"]
@@ -84,7 +91,7 @@ def render():
                 st.dataframe(_changes_table(rep["request_changes"] + rep["response_changes"]), hide_index=True,
                              use_container_width=True)
     with tab_inc:
-        incs = [i for i in (safe_call(api, "GET", "/api/incidents", params={"limit": 300}) or []) if i.get("drift")]
+        incs = [i for i in (safe_call(api, "GET", f"{prefix}/incidents", params={"limit": 300}) or []) if i.get("drift")]
         if not incs:
             st.info("No incident with a drift report yet.")
             return

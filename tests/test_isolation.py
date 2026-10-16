@@ -112,3 +112,19 @@ def test_llm_involvement_is_labelled(make_engine):
     assert r["llm"]["label"] == "MOCK (not a real model)" and r["llm"]["real"] is False
     assert sim.llm_label({"provider": "gemini", "real": True, "ok": True})["label"] == "REAL Gemini request"
     assert sim.llm_label(None) == {"used": False, "label": "not used"}
+
+
+def test_legacy_mixed_database_is_cleaned_when_opened_as_production(tmp_path):
+    import sqlite3
+    from adaptix.storage import DDL
+    path = tmp_path / "legacy.db"
+    c = sqlite3.connect(path)
+    c.executescript(DDL.split("CREATE TABLE IF NOT EXISTS checks")[0])
+    c.execute("INSERT INTO tools (name, spec, created_at) VALUES ('s', ?, 'x')",
+              (ToolSpec(name="s", base_url="sim://s", path="/x", simulated=True).model_dump_json(),))
+    c.execute("INSERT INTO incidents (id, tool, simulated, data) VALUES ('i1', 's', 1, '{}')")
+    c.execute("INSERT INTO events (ts, kind, simulated, data) VALUES ('t', 'k', 1, '{}')")
+    c.commit()
+    c.close()
+    st = Storage(path, "production")
+    assert st.tools() == [] and st.events() == []

@@ -18,6 +18,16 @@ STATUS = {   # one consistent vocabulary and colour per outcome
     "stopped": ("Stopped safely", "#B45309", "#FFFBEB"), "rolled_back": ("Rolled back", "#6D28D9", "#F5F3FF"),
     "failed": ("Failed", "#B91C1C", "#FEF2F2"), "open": ("Open", "#475569", "#F1F5F9"),
     "healthy": ("Healthy", "#047857", "#ECFDF5"), "degraded": ("Degraded", "#B45309", "#FFFBEB"),
+    # integration / monitoring statuses
+    "VERIFIED": ("VERIFIED", "#047857", "#ECFDF5"), "CONFIGURED": ("CONFIGURED", "#1D4ED8", "#EFF6FF"),
+    "FAILED": ("FAILED", "#B91C1C", "#FEF2F2"), "ACTION REQUIRED": ("ACTION REQUIRED", "#B45309", "#FFFBEB"),
+    "NOT RUN": ("NOT RUN", "#475569", "#F1F5F9"), "UNSUPPORTED": ("UNSUPPORTED", "#6D28D9", "#F5F3FF"),
+    "NOT REQUIRED": ("NOT REQUIRED", "#475569", "#F1F5F9"), "YES": ("YES", "#047857", "#ECFDF5"),
+    "NO": ("NO", "#B45309", "#FFFBEB"),
+    "verified": ("Verified", "#047857", "#ECFDF5"), "unsupported": ("Schema not published", "#6D28D9", "#F5F3FF"),
+    "reachable": ("Reachable", "#047857", "#ECFDF5"), "unreachable": ("Unreachable", "#B91C1C", "#FEF2F2"),
+    "not_checked": ("Not checked", "#475569", "#F1F5F9"), "not_run": ("Not run", "#475569", "#F1F5F9"),
+    "drift": ("Schema drift", "#B45309", "#FFFBEB"), "no_drift": ("No drift", "#047857", "#ECFDF5"),
 }
 STAGE_ICON = {"request": "send", "classify": "category", "discover": "travel_explore", "diff": "difference",
               "plan": "edit_note", "validate": "verified", "apply": "inventory", "retry": "replay",
@@ -106,6 +116,7 @@ def badge(status: str) -> str:
 
 
 SIM_BADGE = '<span class="ax-badge ax-sim">SIMULATED</span>'
+REAL_BADGE = '<span class="ax-badge" style="background:#ECFDF5;color:#065F46;border-color:#6EE7B7">REAL API</span>'
 BASELINE_BADGE = '<span class="ax-badge" style="background:#E2E8F0;color:#334155">BASELINE · repair off</span>'
 
 
