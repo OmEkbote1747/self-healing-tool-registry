@@ -61,8 +61,26 @@ class ApiError(RuntimeError):
         self.status, self.detail = status, detail
 
 
-@st.cache_resource(show_spinner=False)
+def _code_version() -> str:
+    """Fingerprint of the backend source. When a deployment updates the code, the cached in-process API is
+    rebuilt instead of serving routes from the previous version (seen on Streamlit Cloud hot updates)."""
+    import hashlib
+    h = hashlib.sha1()
+    for p in sorted((ROOT / "adaptix").rglob("*.py")):
+        stat = p.stat()
+        h.update(f"{p.name}:{stat.st_mtime_ns}:{stat.st_size}".encode())
+    return h.hexdigest()[:12]
+
+
 def _client():
+    return _client_for(_code_version())
+
+
+@st.cache_resource(show_spinner=False, max_entries=1)
+def _client_for(code_version: str):
+    import sys
+    for m in [m for m in sys.modules if m == "adaptix" or m.startswith("adaptix.")]:
+        del sys.modules[m]                       # load the current backend code, not a stale copy
     from adaptix.config import get_settings
     s = get_settings()
     headers = {"Authorization": f"Bearer {s.admin_token}"}
