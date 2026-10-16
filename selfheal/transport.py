@@ -23,6 +23,8 @@ REPAIRABLE = {400, 422}           # validation errors: safe to repair and replay
 NOT_SCHEMA = {401: "authentication failed or changed - new credentials are needed",
               403: "permission denied - not a schema problem",
               404: "endpoint not found - the API may have moved; needs a human",
+              405: "the API no longer accepts this HTTP method - a method change can alter side effects; needs a human",
+              415: "the request format changed (e.g. form or XML) - only JSON bodies are repaired automatically",
               409: "conflict reported by the API - not replayed",
               429: "rate limited by the API - try later"}
 
@@ -115,8 +117,8 @@ class Transport:
     def get(self, path: str):
         return self.client.get(path)
 
-    def send(self, method: str, path: str, *, tool: str, json=None, headers=None, idempotency_key: str,
-             is_retry: bool = False):
+    def send(self, method: str, path: str, *, tool: str, json=None, params=None, headers=None,
+             idempotency_key: str, is_retry: bool = False):
         with self._lock:
             if not self._breaker(tool).allow():
                 raise TransportError("circuit_open", f"circuit open for {tool}: recent calls kept failing")
@@ -129,7 +131,7 @@ class Transport:
         headers = {**(headers or {}), "Idempotency-Key": idempotency_key}
         try:
             extra = {} if _in_process(self.client) else {"timeout": self.timeout}
-            r = self.client.request(method, path, json=json, headers=headers, **extra)
+            r = self.client.request(method, path, json=json, params=params, headers=headers, **extra)
         except httpx.TimeoutException as e:
             self._breaker(tool).record(False)
             raise TransportError("timeout", f"no answer within {self.timeout:.1f}s - outcome unknown, not replayed") from e

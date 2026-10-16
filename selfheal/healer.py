@@ -22,11 +22,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, FormatChecker
 from rapidfuzz import fuzz
 
 from . import llm
 from .policy import PolicySet
+from .schema import FieldSpec, Operation, read_operation
 from .security import redact, redact_headers, redact_reply
 from .transport import NOT_SCHEMA, REPAIRABLE, Transport, TransportError
 
@@ -47,6 +48,8 @@ class ToolDef:
     origin: str = "initial"       # initial | auto | approved
     owner: str | None = None      # agent that created a canary version
     successes: int = 0
+    method: str = "POST"
+    param_map: dict[str, tuple[str, str | None]] = field(default_factory=dict)  # "query:x"/"path:x" -> (arg, conv)
 
     def build(self, args: dict, config: dict) -> tuple[dict, dict]:
         body: dict = {}
@@ -56,10 +59,24 @@ class ToolDef:
         headers = {h: config[k] for h, k in self.header_map.items()}
         return body, headers
 
+    def build_request(self, args: dict, config: dict) -> dict:
+        body, headers = self.build(args, config)
+        query, path_params = {}, {}
+        for loc, (src, conv) in self.param_map.items():
+            where, name = loc.split(":", 1)
+            value = args[src] if conv is None else convert(args[src], conv)
+            (query if where == "query" else path_params)[name] = value
+        url = self.path.format(**{k: str(v) for k, v in path_params.items()}) if path_params else self.path
+        return {"method": self.method, "url": url, "query": query, "path_params": path_params,
+                "body": body if self.body_map else None, "headers": headers}
+
     def describe(self) -> dict:
-        return {"version": self.version, "status": self.status, "origin": self.origin,
-                "body": {t: (s if c is None else f"{s} as {c}") for t, (s, c) in self.body_map.items()},
-                "headers": {h: f"config[{k}]" for h, k in self.header_map.items()}}
+        d = {"version": self.version, "status": self.status, "origin": self.origin, "method": self.method,
+             "body": {t: (s if c is None else f"{s} as {c}") for t, (s, c) in self.body_map.items()},
+             "headers": {h: f"config[{k}]" for h, k in self.header_map.items()}}
+        if self.param_map:
+            d["params"] = {t: (s if c is None else f"{s} as {c}") for t, (s, c) in self.param_map.items()}
+        return d
 
 
 @dataclass
@@ -91,8 +108,8 @@ class ToolRegistry:
         self.proposals: dict[str, Proposal] = {}
         self.promote_after = promote_after
 
-    def register(self, name: str, path: str, schema: dict[str, str]):
-        self.versions[name] = [ToolDef(name, path, 1, {k: (k, None) for k in schema})]
+    def register(self, name: str, path: str, schema: dict[str, str], method: str = "POST"):
+        self.versions[name] = [initial_tooldef(name, path, schema, method)]
 
     def current(self, name: str, agent_id: str | None = None) -> ToolDef:
         for td in reversed(self.versions[name]):
@@ -185,11 +202,29 @@ def convert(value, to: str):
         if str(value).lower() in ("true", "false"):
             return str(value).lower() == "true"
         raise ValueError(f"{value!r} is not true/false")
+    if to == "date":
+        import datetime as _dt
+        try:
+            return _dt.date.fromisoformat(str(value)).isoformat()
+        except ValueError:
+            raise ValueError(f"{value!r} is not an ISO date (YYYY-MM-DD)") from None
+    if to == "list":
+        if isinstance(value, list):
+            return value
+        raise ValueError(f"{value!r} is not a list")
     raise ValueError(f"unknown type {to}")
 
 
 def py_type(v) -> str:
-    return {bool: "bool", int: "int", float: "float"}.get(type(v), "str")
+    return {bool: "bool", int: "int", float: "float", list: "list", dict: "object"}.get(type(v), "str")
+
+
+def initial_tooldef(name: str, path: str, schema: dict[str, str], method: str = "POST") -> ToolDef:
+    """Version 1 of a tool: every argument goes where the original schema put it."""
+    body = {k: (k, None) for k in schema if not k.startswith(("q:", "p:"))}
+    params = {("query:" if k.startswith("q:") else "path:") + k[2:]: (k[2:], None)
+              for k in schema if k.startswith(("q:", "p:"))}
+    return ToolDef(name, path, 1, body, method=method.upper(), param_map=params)
 
 
 def tokens(name: str) -> str:
@@ -203,57 +238,26 @@ def similarity(a: str, b: str) -> float:
 
 
 # ---------------------------------------------------------------- schema reading
-def read_openapi(client, path: str) -> tuple[dict, dict[str, str], list[str]] | None:
-    """Return (resolved body json-schema, {leaf path: type}, [required headers]) from /openapi.json."""
-    try:
-        spec = client.get("/openapi.json").json()
-        op = spec["paths"][path]["post"]
-    except Exception:
-        return None
-    comps = spec.get("components", {}).get("schemas", {})
-
-    def resolve(s):
-        if isinstance(s, dict):
-            if "$ref" in s:
-                return resolve(comps[s["$ref"].split("/")[-1]])
-            return {k: resolve(v) for k, v in s.items()}
-        if isinstance(s, list):
-            return [resolve(x) for x in s]
-        return s
-
-    body = resolve(op["requestBody"]["content"]["application/json"]["schema"])
-    leaves: dict[str, str] = {}
-
-    def walk(s, prefix=""):
-        for name, sub in s.get("properties", {}).items():
-            p = f"{prefix}{name}"
-            if sub.get("type") == "object" or "properties" in sub:
-                walk(sub, p + ".")
-            elif name in s.get("required", []):
-                leaves[p] = JSON_TO_PY.get(sub.get("type"), "str")
-
-    walk(body)
-    headers = [p["name"].lower() for p in op.get("parameters", []) if p.get("in") == "header" and p.get("required")]
-    return body, leaves, headers
-
-
-def schema_from_errors(td: ToolDef, args: dict, errors: list[dict]) -> tuple[None, dict[str, str], list[str]]:
+def schema_from_errors(td: ToolDef, args: dict, errors: list[dict]) -> Operation:
     """Fallback when /openapi.json is not available: infer the new shape from 422 error locations."""
-    leaves = {t: py_type(convert(args[s], c) if c else args[s]) for t, (s, c) in td.body_map.items()}
+    fields = {"body:" + t: FieldSpec([py_type(convert(args[s], c) if c else args[s])], True)
+              for t, (s, c) in td.body_map.items()}
+    fields.update({loc: FieldSpec([py_type(args[s])], True) for loc, (s, _) in td.param_map.items()})
     headers = []
     for e in errors:
         loc = e.get("loc", [])
         if loc and loc[0] == "header":
             headers.append(loc[1])
             continue
-        p = ".".join(str(x) for x in loc[1:])
+        where = loc[0] if loc and loc[0] in ("query", "path") else "body"
+        key = f"{where}:" + ".".join(str(x) for x in loc[1:])
         etype = e.get("type", "")
         m = re.match(r"(int|float|string|bool)", etype)
         if etype == "missing":
-            leaves[p] = leaves.get(p, "str")
+            fields.setdefault(key, FieldSpec(["str"], True))
         elif m:
-            leaves[p] = {"string": "str"}.get(m.group(1), m.group(1))
-    return None, leaves, headers
+            fields[key] = FieldSpec([{"string": "str"}.get(m.group(1), m.group(1))], True)
+    return Operation(td.method, td.path, fields, headers, None, ["application/json"])
 
 
 # ---------------------------------------------------------------- result object
@@ -358,15 +362,22 @@ class SelfHealer:
         return out
 
     def _send(self, client: Transport, td: ToolDef, args, out: Outcome, label: str, key: str, is_retry=False):
-        body, headers = td.build(args, self.config)
+        req = td.build_request(args, self.config)
+        body, headers = req["body"] or {}, req["headers"]
         out.calls += 1                     # counted even if the answer never arrives
-        r = client.send("POST", td.path, tool=td.name, json=body, headers=headers, idempotency_key=key,
-                        is_retry=is_retry)
-        out.sent.append({"body": body, "headers": headers, "status": r.status_code})
-        payload = r.json()
-        out.trace.append({"step": f"Request: {label}", "ok": r.status_code < 400,
-                          "detail": {"sent": redact(body), "headers": redact_headers(headers),
-                                     "status": r.status_code, "reply": redact_reply(payload)}})
+        r = client.send(req["method"], req["url"], tool=td.name, json=req["body"], params=req["query"] or None,
+                        headers=headers, idempotency_key=key, is_retry=is_retry)
+        out.sent.append({"body": body, "headers": headers, "params": {**req["query"], **req["path_params"]},
+                         "status": r.status_code})
+        try:
+            payload = r.json()
+        except ValueError:
+            payload = {"detail": r.text[:200]}
+        detail = {"method": req["method"], "url": req["url"], "sent": redact(body),
+                  "headers": redact_headers(headers), "status": r.status_code, "reply": redact_reply(payload)}
+        if req["query"]:
+            detail["query"] = redact(req["query"])
+        out.trace.append({"step": f"Request: {label}", "ok": r.status_code < 400, "detail": detail})
         return r.status_code, payload
 
     def _stop(self, out: Outcome, reason: str):
@@ -378,32 +389,39 @@ class SelfHealer:
                                agent_id: str = "agent-A"):
         policy = self.policies.for_tool(td.name)
         # 1. read the new schema (prefer /openapi.json, fall back to the error locations)
-        found = read_openapi(client, td.path)
+        op = read_operation(client, td.path, td.method)
         source = "/openapi.json"
-        if found is None:
-            found, source = schema_from_errors(td, args, errors), "422 error locations"
-        body_schema, leaves, req_headers = found
+        if isinstance(op, str):
+            return self._stop(out, f"the API now expects {op} instead of {td.method} on {td.path}; "
+                                   "a method change can alter side effects, so a human must decide")
+        if op is None:
+            op, source = schema_from_errors(td, args, errors), "422 error locations"
+        if op.content_types and "application/json" not in op.content_types:
+            return self._stop(out, f"request body is now {', '.join(op.content_types)}; only JSON bodies are "
+                                   "repaired automatically")
+        fields = op.fields
 
-        # 2. what changed
-        old_targets = set(td.body_map)
-        kept = {t: v for t, v in td.body_map.items() if t in leaves}
-        unfilled = [p for p in leaves if p not in kept]
-        orphans = [s for t, (s, _) in td.body_map.items() if t not in leaves]
-        missing_headers = [h for h in req_headers if h not in td.header_map]
-        changes = ([f"field removed/renamed: {t}" for t in sorted(old_targets - set(leaves))] +
-                   [f"new required field: {p} ({leaves[p]})" for p in unfilled] +
-                   [f"type changed: {t} is now {leaves[t]}" for t, (s, c) in kept.items()
-                    if py_type(convert(args[s], c) if c else args[s]) != leaves[t]] +
+        # 2. what changed (every field is keyed by location: body:..., query:..., path:...)
+        current = {"body:" + t: v for t, v in td.body_map.items()} | dict(td.param_map)
+        kept = {loc: v for loc, v in current.items() if loc in fields}
+        unfilled = [loc for loc, f in fields.items() if f.required and loc not in kept]
+        optional = [loc for loc, f in fields.items() if not f.required and loc not in kept]
+        orphans = [s for loc, (s, _) in current.items() if loc not in fields]
+        missing_headers = [h for h in op.headers if h not in td.header_map]
+        name = lambda loc: loc.split(":", 1)[1]
+        changes = ([f"removed/renamed: {loc}" for loc in sorted(set(current) - set(fields))] +
+                   [f"new required {loc} ({fields[loc].type})" for loc in unfilled] +
+                   [f"type changed: {loc} is now {fields[loc].type}" for loc, (s, c) in kept.items()
+                    if py_type(convert(args[s], c) if c else args[s]) not in fields[loc].types
+                    and fields[loc].type not in ("enum", "date")] +
                    [f"new required header: {h}" for h in missing_headers])
         out.trace.append({"step": "Detected schema change", "ok": True,
                           "detail": {"source": source, "errors": redact_reply({"detail": errors})["detail"],
                                      "changes": changes}})
 
-        new_map: dict[str, tuple[str, str | None]] = {}
-        for t, (s, _) in kept.items():
-            new_map[t] = (s, None if py_type(args[s]) == leaves[t] else leaves[t])
+        new_map: dict[str, tuple[str, str | None]] = {loc: (s, None) for loc, (s, _) in kept.items()}
 
-        # 3a. Tier 1 rules: match each new field to an orphaned argument, then ask the policy
+        # 3a. Tier 1 rules: match each new required field to an orphaned argument, then ask the policy
         tier = "Tier 1 (rules)"
         notes, needs_approval = [], []
         field_reasons: dict[str, list[str]] = {}   # approval reasons per mapped field
@@ -411,54 +429,61 @@ class SelfHealer:
         used: set[str] = set()
         confirm: list[str] = []   # medium-confidence matches the LLM should double-check
 
-        def accept(p, s, score, why):
-            decision, reasons = policy.assess(s, p, score)
+        def accept(loc, s, score, why):
+            decision, reasons = policy.assess(s, name(loc), score)
             if decision == "block":
-                unresolved.append(p)
+                unresolved.append(loc)
                 return
-            new_map[p] = (s, None)
+            new_map[loc] = (s, None)
             used.add(s)
-            notes.append(f"{s} -> {p} ({why}, similarity {score:.0f})")
+            notes.append(f"{s} -> {loc} ({why}, similarity {score:.0f})")
             if decision == "approval":
-                field_reasons[p] = reasons
-                confirm.append(p)
+                field_reasons[loc] = reasons
+                confirm.append(loc)
 
         if len(unfilled) == 1 and len(orphans) == 1:
-            accept(unfilled[0], orphans[0], similarity(unfilled[0], orphans[0]), "only candidate")
+            accept(unfilled[0], orphans[0], similarity(name(unfilled[0]), orphans[0]), "only candidate")
         else:
-            for p in unfilled:
-                scored = sorted(((similarity(p, s), s) for s in orphans if s not in used), reverse=True)
+            for loc in unfilled:
+                scored = sorted(((similarity(name(loc), s), s) for s in orphans if s not in used), reverse=True)
                 if scored and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 15):
-                    accept(p, scored[0][1], scored[0][0], "best match")
+                    accept(loc, scored[0][1], scored[0][0], "best match")
                 else:
-                    unresolved.append(p)
+                    unresolved.append(loc)
+        # optional fields are only filled by an exact name match; otherwise they are left out
+        for loc in optional:
+            exact = [s for s in orphans if s not in used and tokens(s) == tokens(name(loc).split(".")[-1])]
+            if exact:
+                new_map[loc] = (exact[0], None)
+                used.add(exact[0])
+                notes.append(f"{exact[0]} -> {loc} (optional field, exact name)")
 
         # 3b. Tier 2: an LLM picks among existing arguments when the rules are unsure. It sees field
         #     names and types only - never values - and its picks always need human approval.
         if confirm and self.use_llm:
-            for p in confirm:
-                s = new_map.pop(p)[0]
+            for loc in confirm:
+                s = new_map.pop(loc)[0]
                 used.discard(s)
-                unresolved.append(p)
-                field_reasons.pop(p, None)
+                unresolved.append(loc)
+                field_reasons.pop(loc, None)
         if unresolved and [s for s in orphans if s not in used]:
             if self.use_llm:
                 tier = "Tier 1 + Tier 2 (LLM)"
                 cand = {s: py_type(args[s]) for s in orphans if s not in used}
-                proposal, tok, note = llm.propose_mapping(td.name, {p: leaves[p] for p in unresolved}, cand,
-                                                          errors)
+                proposal, tok, note = llm.propose_mapping(td.name, {name(l): fields[l].type for l in unresolved},
+                                                          cand, errors)
                 out.tokens += tok
                 out.trace.append({"step": "LLM proposed a repair", "ok": bool(proposal),
                                   "detail": {"proposal": proposal, "note": note, "tokens": tok}})
-                for p in list(unresolved):
-                    s = proposal.get(p)
+                for loc in list(unresolved):
+                    s = proposal.get(name(loc))
                     if s in cand and s not in used:      # validator rule: source must be a real, unused arg
-                        new_map[p] = (s, None)
+                        new_map[loc] = (s, None)
                         used.add(s)
-                        unresolved.remove(p)
-                        notes.append(f"{s} -> {p} (LLM)")
+                        unresolved.remove(loc)
+                        notes.append(f"{s} -> {loc} (LLM)")
                         if policy.llm_needs_approval:
-                            needs_approval.append(f"{s} -> {p}: proposed by the LLM")
+                            needs_approval.append(f"{s} -> {name(loc)}: proposed by the LLM")
             else:
                 notes.append("LLM tier is off, so ambiguous fields are not guessed")
         out.tier = tier
@@ -469,18 +494,28 @@ class SelfHealer:
             return self._stop(out, "cannot fill required field(s) " + ", ".join(unresolved) +
                               " from the agent's data - asking the user instead of guessing")
 
-        # 3c. lossless type conversions only
-        for p, (s, _) in list(new_map.items()):
-            have, want = py_type(args[s]), leaves[p]
-            if have != want:
-                try:
-                    convert(args[s], want)
-                except ValueError as e:
-                    return self._stop(out, f"cannot convert {s}={args[s]!r} to {want} for {p}: {e}")
-                new_map[p] = (s, want)
-                notes.append(f"{s}: {have} -> {want}")
+        # 3c. compatibility of each value with its new field: lossless conversion, enum, format, list
+        for loc, (s, _) in list(new_map.items()):
+            f, value = fields[loc], args[s]
+            if f.enum is not None:
+                if str(value) not in [str(e) for e in f.enum]:
+                    return self._stop(out, f"{s}={value!r} is not one of the values {loc} now allows "
+                                           f"({', '.join(map(str, f.enum))}); choosing one would be a guess")
+                continue
+            want = f.type if f.type == "date" else (py_type(value) if py_type(value) in f.types else f.types[0])
+            if want == "object":
+                return self._stop(out, f"{loc} is now an object with unknown inner fields; needs a human")
+            if py_type(value) == want and want != "date":
+                continue
+            try:
+                converted = convert(value, want)
+            except ValueError as e:
+                return self._stop(out, f"cannot convert {s}={value!r} to {want} for {loc}: {e}")
+            if converted != value:
+                new_map[loc] = (s, want)
+                notes.append(f"{s}: {py_type(value)} -> {want}")
                 if not policy.auto_type_conversion:
-                    needs_approval.append(f"{s}: {have} -> {want} conversion (tool policy)")
+                    needs_approval.append(f"{s}: {py_type(value)} -> {want} conversion (tool policy)")
 
         # 3d. headers from approved config only, never guessed
         header_map = dict(td.header_map)
@@ -496,25 +531,36 @@ class SelfHealer:
         if not policy.auto_repair:
             needs_approval.append(f"tool policy: every repair of {td.name} needs approval")
 
-        candidate = ToolDef(td.name, td.path, td.version + 1, new_map, header_map,
-                            status="canary", origin="auto", owner=agent_id)
+        body_map = {loc[5:]: v for loc, v in new_map.items() if loc.startswith("body:")}
+        param_map = {loc: v for loc, v in new_map.items() if not loc.startswith("body:")}
+        candidate = ToolDef(td.name, td.path, td.version + 1, body_map, header_map, status="canary",
+                            origin="auto", owner=agent_id, method=td.method, param_map=param_map)
         out.trace.append({"step": "Proposed repair", "ok": True,
                           "detail": {"tier": tier, "mapping": notes, "tool": candidate.describe()}})
 
-        # 4. validator: schema check + provenance check, before anything is sent
-        body, headers = candidate.build(args, self.config)
+        # 4. validator: schema + format check and provenance check, before anything is sent
+        req = candidate.build_request(args, self.config)
         problems = []
-        if body_schema is not None:
-            problems += [e.message for e in Draft202012Validator(body_schema).iter_errors(body)]
+        if op.body_schema is not None:
+            problems += [e.message for e in Draft202012Validator(op.body_schema, format_checker=FormatChecker())
+                         .iter_errors(req["body"] or {})]
+        for loc, f in fields.items():
+            if loc.startswith("body:") or loc not in param_map:
+                continue
+            where, pname = loc.split(":", 1)
+            value = (req["query"] if where == "query" else req["path_params"])[pname]
+            problems += [f"{loc}: {e.message}" for e in
+                         Draft202012Validator(f.schema, format_checker=FormatChecker()).iter_errors(value)]
         allowed = set(map(repr, args.values()))
         for s, c in new_map.values():
             if c:
                 allowed.add(repr(convert(args[s], c)))
-        for leaf in _leaves(body):
-            if repr(leaf) not in allowed:
+        sent_values = list(_leaves(req["body"] or {})) + list(req["query"].values()) + list(req["path_params"].values())
+        for leaf in sent_values:
+            if repr(leaf) not in allowed and not any(repr(leaf) == repr(x) for x in _leaves(list(args.values()))):
                 problems.append(f"value {leaf!r} does not come from the agent's data")
-        for h in req_headers:
-            if h not in headers:
+        for h in op.headers:
+            if h not in req["headers"]:
                 problems.append(f"header {h} missing")
         out.trace.append({"step": "Validator decision", "ok": not problems,
                           "detail": "ACCEPT: fits the new schema, every value comes from known data or config"

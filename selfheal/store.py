@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .healer import ConflictError, Proposal, ToolDef
+from .healer import ConflictError, Proposal, ToolDef, initial_tooldef
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tools (
@@ -49,14 +49,16 @@ def _now() -> str:
 
 
 def _td_to_json(td: ToolDef) -> str:
-    return json.dumps({"path": td.path, "body_map": td.body_map, "header_map": td.header_map})
+    return json.dumps({"path": td.path, "body_map": td.body_map, "header_map": td.header_map,
+                       "method": td.method, "param_map": td.param_map})
 
 
 def _td_from_row(name: str, row) -> ToolDef:
     d = json.loads(row["definition"])
     return ToolDef(name, d["path"], row["version"], {k: tuple(v) for k, v in d["body_map"].items()},
                    d["header_map"], status=row["status"], origin=row["origin"], owner=row["owner"],
-                   successes=row["successes"])
+                   successes=row["successes"], method=d.get("method", "POST"),
+                   param_map={k: tuple(v) for k, v in d.get("param_map", {}).items()})
 
 
 class SqliteRegistry:
@@ -91,8 +93,8 @@ class SqliteRegistry:
                   (self.tenant, _now(), kind, tool, json.dumps(data)))
 
     # -- tools and versions
-    def register(self, name: str, path: str, schema: dict[str, str]):
-        td = ToolDef(name, path, 1, {k: (k, None) for k in schema})
+    def register(self, name: str, path: str, schema: dict[str, str], method: str = "POST"):
+        td = initial_tooldef(name, path, schema, method)
         with self._tx() as c:
             c.execute("DELETE FROM versions WHERE tenant=? AND tool=?", (self.tenant, name))
             c.execute("DELETE FROM proposals WHERE tenant=? AND tool=?", (self.tenant, name))

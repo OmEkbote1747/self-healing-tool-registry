@@ -55,4 +55,9 @@ with st.sidebar:
                     f"{os.environ.get('SCHEMAHEAL_RETENTION_DAYS', '30')} days")
     st.caption("PS-01 · Team Runtime Terrors · Genesis 2.0")
 
-nav.run()
+# tests can render a specific page directly; normal visitors always go through the navigation
+if "_force_page" in st.session_state:
+    {"home": home.render, "how": how.render, "demo": demo.render, "bench": benchmark.render,
+     "stress": stress.render, "registry": registry.render}[st.session_state["_force_page"]]()
+else:
+    nav.run()
