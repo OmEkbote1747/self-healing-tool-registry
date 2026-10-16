@@ -1,29 +1,55 @@
 import streamlit as st
 
+from selfheal.healer import ConflictError
 from views.common import LOG, footer, page_header
 
 
 def render():
-    page_header("Console · Registry & audit log", "Every repair is versioned and logged",
-                "Accepted repairs become a new tool version, are shared with other agents, and are written to an "
-                "append-only JSON Lines audit log. Any version can be rolled back.")
+    page_header("Console · Registry & review queue", "Every repair is versioned, reviewed and logged",
+                "Automatic repairs start as a canary used only by the agent that made them, and are shared after "
+                "they succeed a few times. Ambiguous repairs wait here for a human. Any version can be rolled back.")
     demo = st.session_state.get("demo")
-    if demo:
-        registry = demo[4]
-        for name, versions in registry.versions.items():
-            with st.container(border=True):
-                st.markdown(f"#### Tool `{name}` · {len(versions)} version(s)")
-                cols = st.columns(len(versions))
-                for col, v in zip(cols, versions):
-                    with col:
-                        st.markdown(f"**v{v.version}**" + (" (current)" if v is versions[-1] else ""))
-                        st.json(v.describe())
-                if len(versions) > 1 and st.button(f"Roll back {name} to v{versions[-2].version}",
-                                                   icon=":material/undo:"):
-                    registry.rollback(name)
-                    st.rerun()
-    else:
-        st.info("Run the live demo first to see a tool get repaired and versioned.", icon=":material/info:")
+    if not demo:
+        st.info("Run the live demo first to see a tool get repaired, reviewed and versioned.", icon=":material/info:")
+        footer()
+        return
+    registry = demo["registry"]
+
+    st.subheader("Review queue")
+    pending = registry.pending()
+    if not pending:
+        st.caption("No repairs waiting for approval.")
+    for p in pending:
+        with st.container(border=True):
+            st.markdown(f"**Proposal `{p.id}`** for `{p.tool}` (based on v{p.base_version})")
+            for r in p.reasons:
+                st.markdown(f"- {r}")
+            st.json(p.candidate.describe())
+            a, b = st.columns(2)
+            if a.button("Approve", key=f"ap-{p.id}", type="primary", icon=":material/check:"):
+                try:
+                    registry.approve(p.id, by="reviewer")
+                except ConflictError as e:
+                    st.error(str(e))
+                st.rerun()
+            if b.button("Reject", key=f"rj-{p.id}", icon=":material/close:"):
+                registry.reject(p.id, by="reviewer")
+                st.rerun()
+
+    st.subheader("Tool versions")
+    for name, versions in registry.versions.items():
+        with st.container(border=True):
+            st.markdown(f"#### Tool `{name}` · {len(versions)} version(s)")
+            cols = st.columns(min(len(versions), 4))
+            for col, v in zip(cols * 10, versions):
+                with col:
+                    current = v is registry.current(name)
+                    st.markdown(f"**v{v.version}** · {v.status}" + (" · *current*" if current else ""))
+                    st.json(v.describe())
+            live = [v for v in versions if v.status in ("active", "canary")]
+            if len(live) > 1 and st.button(f"Roll back {name} to v{live[-2].version}", icon=":material/undo:"):
+                registry.rollback(name)
+                st.rerun()
     if LOG.exists():
         lines = LOG.read_text().strip().splitlines()[-20:]
         st.subheader(f"Audit log · last {len(lines)} entries")

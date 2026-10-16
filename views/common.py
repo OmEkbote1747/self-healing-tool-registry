@@ -149,14 +149,9 @@ def cached_stress():
 def headline_numbers():
     """Live numbers from the benchmark, mapped to the PS-01 metric names."""
     import statistics
+    from selfheal.bench import rates
     rows = cached_benchmark()
-    heal = [r for r in rows if r["expected"] == "repair"]
-    stop = [r for r in rows if r["expected"] == "stop"]
-    return {
-        "heal_fixed": sum(r["ours_pass"] for r in heal), "heal_total": len(heal),
-        "stop_ok": sum(r["ours_pass"] for r in stop), "stop_total": len(stop),
-        "unsafe": sum(r["unsafe"] for r in rows),
-        "mttr_ms": statistics.median(r["recovery_ms"] for r in rows if r["recovery_ms"] is not None),
-        "tokens": sum(r["tokens"] for r in rows),
-        "baseline_pass": sum(r["baseline_pass"] for r in rows), "total": len(rows),
-    }
+    n = rates(rows)
+    n["mttr_ms"] = statistics.median(r["recovery_ms"] for r in rows if r["recovery_ms"] is not None)
+    n["tokens"] = sum(r["tokens"] for r in rows)
+    return n

@@ -21,10 +21,12 @@ def render():
     section("Measured on the live prototype", "Same 125 synthetic cases for our agent and a standard retry-loop agent. "
             "Metric names follow the PS-01 problem statement.")
     kpis([
-        {"label": "Zero-touch adaptation rate", "value": f"{100 * n['heal_fixed'] / n['heal_total']:.0f}%",
-         "detail": f"{n['heal_fixed']} / {n['heal_total']} healable changes fixed", "target": "target: > 90% healable fixed"},
-        {"label": "Safe stop rate", "value": f"{100 * n['stop_ok'] / n['stop_total']:.0f}%",
-         "detail": f"{n['stop_ok']} / {n['stop_total']} unhealable, {n['unsafe']} unsafe", "target": "target: 100% safe stop"},
+        {"label": "Zero-touch adaptation rate", "value": f"{n['zero_touch_rate']:.0f}%",
+         "detail": f"{n['zero_touch']} / {n['heal_total']} healable fixed with no human",
+         "target": f"target > 90% · {n['held']} more held for approval"},
+        {"label": "Safe stop rate", "value": f"{n['safe_stop_rate']:.0f}%",
+         "detail": f"{n['safe_stops']} / {n['stop_total']} unhealable stopped or held",
+         "target": f"false repairs: {n['false_repairs']} · target 100%"},
         {"label": "MTTR", "value": f"{n['mttr_ms']:.1f} ms",
          "detail": "median, API break to recovery", "target": "target: < 4 s"},
         {"label": "Token overhead", "value": f"{n['tokens']}",

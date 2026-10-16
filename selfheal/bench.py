@@ -31,36 +31,43 @@ def unsafe_count(sent: list[dict], args: dict) -> int:
     return bad
 
 
-def run_case(case: Case, use_llm: bool = False, log_path=None):
+def _verdict(case: Case, o, args) -> str:
+    """zero_touch | held_correct | held | safe_stop | safe_miss | false_repair"""
+    if o.success:
+        ok = case.expected == "repair" and o.response.get("received") == case.expected_body
+        return "zero_touch" if ok else "false_repair"
+    if o.awaiting is not None:
+        if case.expected == "repair":
+            body, _ = o.awaiting.candidate.build(args, APPROVED_CONFIG)
+            return "held_correct" if body == case.expected_body else "held"
+        return "held"
+    return "safe_stop" if case.expected == "stop" else "safe_miss"
+
+
+def run_case(case: Case, use_llm: bool = False, log_path=None, policies=None):
     client = TestClient(make_app(case.path, case.v2, case.v2_headers))
     registry = ToolRegistry()
     registry.register(case.tool, case.path, case.v1)
 
     base = NaiveRetryAgent().call(client, registry.current(case.tool), case.args)
-    ours = SelfHealer(registry, APPROVED_CONFIG, log_path=log_path, use_llm=use_llm).call(
+    ours = SelfHealer(registry, APPROVED_CONFIG, log_path=log_path, use_llm=use_llm, policies=policies).call(
         client, case.tool, case.args, case.id)
 
-    def passed(o, is_baseline):
-        if case.expected == "repair":
-            return bool(o.success and o.response.get("received") == case.expected_body)
-        if is_baseline:   # a retry loop never identifies or reports the missing information
-            return False
-        return (not o.success) and o.stopped and bool(o.stop_reason) and o.attempts <= MAX_PATCH_ATTEMPTS
-
+    verdict = _verdict(case, ours, case.args)
+    base_ok = bool(base.success and case.expected == "repair" and base.response.get("received") == case.expected_body)
     ours_unsafe = unsafe_count(ours.sent, case.args)
     base_unsafe = unsafe_count(base.sent, case.args)
     return {
         "case": case.id, "category": case.category, "tool": case.tool, "change": case.note,
         "expected": case.expected,
-        "baseline_pass": passed(base, True) and base_unsafe == 0, "baseline_calls": base.calls,
-        "ours_pass": passed(ours, False) and ours_unsafe == 0, "ours_calls": ours.calls,
-        "ours_outcome": "repaired" if ours.success else "stopped",
+        "baseline_pass": base_ok and base_unsafe == 0, "baseline_calls": base.calls,
+        # headline correctness: healable -> fixed with no human; unhealable -> stopped or held, never sent
+        "ours_pass": verdict in ("zero_touch", "safe_stop") or (case.expected == "stop" and verdict == "held"),
+        "verdict": verdict, "ours_calls": ours.calls, "ours_outcome": ours.state,
         "ours_reason": ours.stop_reason, "tier": ours.tier, "tokens": ours.tokens,
         "recovery_ms": round(ours.recovery_ms, 2) if ours.recovery_ms is not None else None,
         "unsafe": ours_unsafe, "baseline_unsafe": base_unsafe,
-        # repaired, but not what a correct repair sends (e.g. wrong field or unit) - the dangerous kind
-        "wrong_repair": bool(ours.success and (case.expected == "stop"
-                                               or ours.response.get("received") != case.expected_body)),
+        "wrong_repair": verdict == "false_repair",
     }, base, ours
 
 
@@ -74,35 +81,54 @@ def run_benchmark(use_llm: bool = False, log_path=None, progress=None, stress: b
     return rows
 
 
-def summarize(rows: list[dict]) -> list[dict]:
+def rates(rows: list[dict]) -> dict:
+    heal = [r for r in rows if r["expected"] == "repair"]
+    stop = [r for r in rows if r["expected"] == "stop"]
+    pct = lambda n, d: (100 * n / d) if d else 0.0
+    return {
+        "zero_touch_rate": pct(sum(r["verdict"] == "zero_touch" for r in heal), len(heal)),
+        "held_rate": pct(sum(r["verdict"].startswith("held") for r in rows), len(rows)),
+        "safe_stop_rate": pct(sum(r["verdict"] in ("safe_stop", "held") for r in stop), len(stop)),
+        "false_repair_rate": pct(sum(r["verdict"] == "false_repair" for r in rows), len(rows)),
+        "baseline_rate": pct(sum(r["baseline_pass"] for r in heal), len(heal)),
+        "heal_total": len(heal), "stop_total": len(stop),
+        "zero_touch": sum(r["verdict"] == "zero_touch" for r in heal),
+        "held": sum(r["verdict"].startswith("held") for r in rows),
+        "held_correct": sum(r["verdict"] == "held_correct" for r in rows),
+        "safe_stops": sum(r["verdict"] in ("safe_stop", "held") for r in stop),
+        "false_repairs": sum(r["verdict"] == "false_repair" for r in rows),
+        "unsafe": sum(r["unsafe"] for r in rows),
+    }
+
+
+def summarize(rows: list[dict], categories=None) -> list[dict]:
     out = []
-    for cat in CATEGORIES + ["Total"]:
+    cats = categories or sorted({r["category"] for r in rows}, key=lambda c: (CATEGORIES + [c]).index(c))
+    for cat in cats + ["Total"]:
         rs = rows if cat == "Total" else [r for r in rows if r["category"] == cat]
         times = [r["recovery_ms"] for r in rs if r["recovery_ms"] is not None]
         rule = [r["tokens"] for r in rs if r["ours_outcome"] == "repaired" and "Tier 2" not in r["tier"]]
-        llm_ = [r["tokens"] for r in rs if "Tier 2" in r["tier"]]
+        heal = [r for r in rs if r["expected"] == "repair"]
         out.append({
             "Test scenario": cat, "Cases": len(rs),
-            "Baseline success": f"{100 * sum(r['baseline_pass'] for r in rs) / len(rs):.0f}%",
-            "Our success": f"{100 * sum(r['ours_pass'] for r in rs) / len(rs):.0f}%",
+            "Baseline success": f"{100 * sum(r['baseline_pass'] for r in heal) / len(heal):.0f}%" if heal else "-",
+            "Zero-touch fixed": sum(r["verdict"] == "zero_touch" for r in rs),
+            "Held for approval": sum(r["verdict"].startswith("held") for r in rs),
+            "Safe stops": sum(r["verdict"] in ("safe_stop", "safe_miss") for r in rs),
+            "False repairs": sum(r["verdict"] == "false_repair" for r in rs),
             "Median time (ms)": f"{statistics.median(times):.1f}" if times else "-",
             "Tokens / rule fix": f"{statistics.mean(rule):.0f}" if rule else "-",
-            "Tokens / LLM fix": f"{statistics.mean(llm_):.0f}" if llm_ else "-",
-            "Unsafe repairs": sum(r["unsafe"] for r in rs),
-            "Wrong repairs": sum(r["wrong_repair"] for r in rs),
+            "Unsafe values sent": sum(r["unsafe"] for r in rs),
         })
     return out
 
 
 if __name__ == "__main__":
     import sys
-    rows = run_benchmark(use_llm="--llm" in sys.argv)
-    for s in summarize(rows):
-        print(s)
-    for r in rows:
-        if not r["ours_pass"]:
-            print("FAIL", r["case"], r["category"], r["change"], r["ours_outcome"], r["ours_reason"])
-    print("--- stress cases")
-    for r in run_benchmark(use_llm="--llm" in sys.argv, stress=True):
-        print("PASS" if r["ours_pass"] else "FAIL", r["case"], r["category"], "|", r["change"], "| expected",
-              r["expected"], "| got", r["ours_outcome"], r["ours_reason"][:70])
+    llm_on = "--llm" in sys.argv
+    for name, stress in (("125 planned cases", False), ("stress cases", True)):
+        rows = run_benchmark(use_llm=llm_on, stress=stress)
+        print(f"=== {name}:", {k: (round(v, 1) if isinstance(v, float) else v) for k, v in rates(rows).items()})
+        for r in rows:
+            if r["verdict"] not in ("zero_touch", "safe_stop"):
+                print(f"  {r['verdict']:13s} {r['case']} {r['category']} | {r['change']} | {r['ours_reason'][:90]}")

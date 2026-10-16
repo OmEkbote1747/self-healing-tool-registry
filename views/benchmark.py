@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 
-from selfheal.bench import run_benchmark, summarize
+from selfheal.bench import rates, run_benchmark, summarize
 from views.common import footer, kpis, page_header, use_llm
 
 
@@ -21,15 +21,18 @@ def render():
     df = pd.DataFrame(rows)
     heal, stop = df[df.expected == "repair"], df[df.expected == "stop"]
     rule = df[(df.ours_outcome == "repaired") & (~df.tier.str.contains("Tier 2"))]
+    n = rates(rows)
     kpis([
-        {"label": "Zero-touch adaptation rate", "value": f"{100 * heal.ours_pass.mean():.0f}%",
-         "detail": f"{int(heal.ours_pass.sum())} / {len(heal)} healable fixed", "target": f"baseline {100 * heal.baseline_pass.mean():.0f}%"},
-        {"label": "Safe stop rate", "value": f"{100 * stop.ours_pass.mean():.0f}%",
-         "detail": f"{int(stop.ours_pass.sum())} / {len(stop)} unhealable stopped", "target": f"unsafe repairs: {int(df.unsafe.sum())}"},
+        {"label": "Zero-touch adaptation rate", "value": f"{n['zero_touch_rate']:.0f}%",
+         "detail": f"{n['zero_touch']} / {n['heal_total']} healable fixed, no human",
+         "target": f"baseline {n['baseline_rate']:.0f}% · {n['held']} held for approval"},
+        {"label": "Safe stop rate", "value": f"{n['safe_stop_rate']:.0f}%",
+         "detail": f"{n['safe_stops']} / {n['stop_total']} unhealable stopped or held", "target": "target 100%"},
+        {"label": "False-repair rate", "value": f"{n['false_repair_rate']:.0f}%",
+         "detail": f"{n['false_repairs']} wrong requests sent", "target": f"unsafe values sent: {n['unsafe']}"},
         {"label": "MTTR (median)", "value": f"{df.recovery_ms.median():.1f} ms",
-         "detail": "API break to recovery or safe stop", "target": "target: < 4 s"},
-        {"label": "Token overhead", "value": f"{rule.tokens.mean():.0f}" if len(rule) else "-",
-         "detail": "tokens per rule-based fix", "target": f"baseline: {df.baseline_calls.mean():.0f} failed calls / case"},
+         "detail": "API break to recovery or safe stop",
+         "target": f"tokens per rule fix: {rule.tokens.mean():.0f}" if len(rule) else "target: < 4 s"},
     ])
     st.subheader("Results by scenario")
     st.dataframe(pd.DataFrame(summarize(rows)), hide_index=True, use_container_width=True)

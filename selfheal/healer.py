@@ -17,6 +17,7 @@ import copy
 import json
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ from jsonschema import Draft202012Validator
 from rapidfuzz import fuzz
 
 from . import llm
+from .policy import PolicySet
 
 MAX_PATCH_ATTEMPTS = 2
 ELIMINATION_MIN = 50   # below this, a lone candidate is not trusted
@@ -39,6 +41,10 @@ class ToolDef:
     version: int
     body_map: dict[str, tuple[str, str | None]]   # new field path -> (source arg, convert-to type)
     header_map: dict[str, str] = field(default_factory=dict)  # header -> approved-config key
+    status: str = "active"        # active | canary | rolled_back
+    origin: str = "initial"       # initial | auto | approved
+    owner: str | None = None      # agent that created a canary version
+    successes: int = 0
 
     def build(self, args: dict, config: dict) -> tuple[dict, dict]:
         body: dict = {}
@@ -49,30 +55,96 @@ class ToolDef:
         return body, headers
 
     def describe(self) -> dict:
-        return {"version": self.version,
+        return {"version": self.version, "status": self.status, "origin": self.origin,
                 "body": {t: (s if c is None else f"{s} as {c}") for t, (s, c) in self.body_map.items()},
                 "headers": {h: f"config[{k}]" for h, k in self.header_map.items()}}
 
 
-class ToolRegistry:
-    """Versioned tool definitions, shared by every agent that uses the registry."""
+@dataclass
+class Proposal:
+    """A repair that passed validation but needs a human decision before it is used."""
+    id: str
+    tool: str
+    base_version: int
+    candidate: ToolDef
+    reasons: list[str]
+    status: str = "pending"       # pending | approved | rejected
+    decided_by: str | None = None
 
-    def __init__(self):
+
+class ConflictError(RuntimeError):
+    """The tool changed since the proposal was made; re-diagnose instead of applying a stale repair."""
+
+
+class ToolRegistry:
+    """Versioned tool definitions shared by every agent.
+
+    New automatic repairs start as a *canary*: only the agent that created them uses them until they
+    have succeeded `promote_after` times. A failing canary is rolled back. Human-approved repairs are
+    active immediately.
+    """
+
+    def __init__(self, promote_after: int = 3):
         self.versions: dict[str, list[ToolDef]] = {}
+        self.proposals: dict[str, Proposal] = {}
+        self.promote_after = promote_after
 
     def register(self, name: str, path: str, schema: dict[str, str]):
         self.versions[name] = [ToolDef(name, path, 1, {k: (k, None) for k in schema})]
 
-    def current(self, name: str) -> ToolDef:
-        return self.versions[name][-1]
+    def current(self, name: str, agent_id: str | None = None) -> ToolDef:
+        for td in reversed(self.versions[name]):
+            if td.status == "active" or (td.status == "canary" and td.owner == agent_id):
+                return td
+        return self.versions[name][0]
+
+    def latest_version(self, name: str) -> int:
+        return self.versions[name][-1].version
 
     def add(self, td: ToolDef):
+        td.version = self.latest_version(td.name) + 1
         self.versions[td.name].append(td)
 
+    def record_success(self, td: ToolDef):
+        td.successes += 1
+        if td.status == "canary" and td.successes >= self.promote_after:
+            td.status = "active"
+
+    def record_failure(self, td: ToolDef):
+        if td.status == "canary":
+            td.status = "rolled_back"
+
     def rollback(self, name: str) -> ToolDef:
-        if len(self.versions[name]) > 1:
-            self.versions[name].pop()
+        live = [v for v in self.versions[name] if v.status in ("active", "canary")]
+        if len(live) > 1:
+            live[-1].status = "rolled_back"
         return self.current(name)
+
+    # -- human approval
+    def propose(self, tool: str, base_version: int, candidate: ToolDef, reasons: list[str]) -> Proposal:
+        p = Proposal(uuid.uuid4().hex[:8], tool, base_version, candidate, reasons)
+        self.proposals[p.id] = p
+        return p
+
+    def pending(self) -> list[Proposal]:
+        return [p for p in self.proposals.values() if p.status == "pending"]
+
+    def approve(self, proposal_id: str, by: str = "reviewer") -> ToolDef:
+        p = self.proposals[proposal_id]
+        if p.status != "pending":
+            raise ConflictError(f"proposal {proposal_id} is already {p.status}")
+        if self.current(p.tool).version != p.base_version:
+            p.status = "rejected"
+            raise ConflictError("tool changed since this repair was proposed; re-run diagnosis")
+        td = copy.deepcopy(p.candidate)
+        td.status, td.origin, td.owner = "active", "approved", None
+        self.add(td)
+        p.status, p.decided_by = "approved", by
+        return td
+
+    def reject(self, proposal_id: str, by: str = "reviewer"):
+        p = self.proposals[proposal_id]
+        p.status, p.decided_by = "rejected", by
 
 
 # ---------------------------------------------------------------- helpers
@@ -190,6 +262,7 @@ class Outcome:
     response: dict | None
     stopped: bool = False
     stop_reason: str = ""
+    awaiting: Proposal | None = None   # repair held for human approval
     attempts: int = 0
     calls: int = 0
     tokens: int = 0
@@ -198,41 +271,50 @@ class Outcome:
     sent: list[dict] = field(default_factory=list)  # every request actually sent
     trace: list[dict] = field(default_factory=list)
 
+    @property
+    def state(self) -> str:
+        return "repaired" if self.success else ("awaiting_approval" if self.awaiting else "stopped")
+
 
 # ---------------------------------------------------------------- the healer
 class SelfHealer:
     def __init__(self, registry: ToolRegistry, config: dict, log_path: str | Path | None = None,
-                 use_llm: bool | None = None):
+                 use_llm: bool | None = None, policies: PolicySet | None = None):
         self.registry = registry
         self.config = {k.lower(): v for k, v in config.items()}
         self.log_path = Path(log_path) if log_path else None
         self.use_llm = llm.available() if use_llm is None else use_llm
+        self.policies = policies or PolicySet()
 
     # -- public
-    def call(self, client, tool: str, args: dict, case_id: str = "") -> Outcome:
+    def call(self, client, tool: str, args: dict, case_id: str = "", agent_id: str = "agent-A") -> Outcome:
         out = Outcome(False, None, None)
-        td = self.registry.current(tool)
-        status, resp = self._send(client, td, args, out, label=f"call with tool v{td.version}")
+        td = self.registry.current(tool, agent_id)
+        status, resp = self._send(client, td, args, out, label=f"call with tool v{td.version} ({td.status})")
         if status < 400:
+            self.registry.record_success(td)
             out.success, out.status, out.response = True, status, resp
             return out
+        self.registry.record_failure(td)     # a failing canary is rolled back
         t0 = time.perf_counter()
         while out.attempts < MAX_PATCH_ATTEMPTS:
             out.attempts += 1
             errors = resp.get("detail", []) if isinstance(resp, dict) else []
-            decision = self._diagnose_and_validate(client, td, args, errors, out)
-            if decision is None:          # stop and report (reason already in trace)
-                out.stopped = True
+            decision = self._diagnose_and_validate(client, td, args, errors, out, agent_id)
+            if decision is None:          # stopped, or held for approval (reason already in trace)
+                out.stopped = out.awaiting is None
                 break
             td = decision
             self.registry.add(td)
             self._log(case_id, tool, td, out)
-            status, resp = self._send(client, td, args, out, label=f"retry with tool v{td.version}")
+            status, resp = self._send(client, td, args, out, label=f"retry with tool v{td.version} ({td.status})")
             if status < 400:
+                self.registry.record_success(td)
                 out.success, out.status, out.response = True, status, resp
                 out.recovery_ms = (time.perf_counter() - t0) * 1000
                 return out
-        if not out.stopped:
+            self.registry.record_failure(td)
+        if not out.stopped and out.awaiting is None:
             out.stopped = True
             out.stop_reason = f"stop switch: still failing after {MAX_PATCH_ATTEMPTS} repair attempts"
             out.trace.append({"step": "Stop switch", "ok": False, "detail": out.stop_reason})
@@ -257,7 +339,9 @@ class SelfHealer:
         out.trace.append({"step": "Stop and report", "ok": False, "detail": reason})
         return None
 
-    def _diagnose_and_validate(self, client, td: ToolDef, args: dict, errors: list[dict], out: Outcome):
+    def _diagnose_and_validate(self, client, td: ToolDef, args: dict, errors: list[dict], out: Outcome,
+                               agent_id: str = "agent-A"):
+        policy = self.policies.for_tool(td.name)
         # 1. read the new schema (prefer /openapi.json, fall back to the error locations)
         found = read_openapi(client, td.path)
         source = "/openapi.json"
@@ -280,49 +364,54 @@ class SelfHealer:
                           "detail": {"source": source, "errors": errors, "changes": changes}})
 
         new_map: dict[str, tuple[str, str | None]] = {}
-        # 3a. kept fields: re-check types
         for t, (s, _) in kept.items():
             new_map[t] = (s, None if py_type(args[s]) == leaves[t] else leaves[t])
 
-        # 3b. Tier 1: match each new field to an orphaned argument
+        # 3a. Tier 1 rules: match each new field to an orphaned argument, then ask the policy
         tier = "Tier 1 (rules)"
-        notes = []
+        notes, needs_approval = [], []
+        field_reasons: dict[str, list[str]] = {}   # approval reasons per mapped field
         unresolved: list[str] = []
         used: set[str] = set()
         confirm: list[str] = []   # medium-confidence matches the LLM should double-check
-        if len(unfilled) == 1 and len(orphans) == 1:
-            p, s = unfilled[0], orphans[0]
-            score = similarity(p, s)
-            if score >= ELIMINATION_MIN:
-                new_map[p] = (s, None)
-                used.add(s)
-                conf = "high" if score >= 75 else "medium"
-                notes.append(f"{s} -> {p} (only candidate, similarity {score:.0f}, {conf} confidence)")
-                if conf == "medium":
-                    confirm.append(p)
-            else:
+
+        def accept(p, s, score, why):
+            decision, reasons = policy.assess(s, p, score)
+            if decision == "block":
                 unresolved.append(p)
+                return
+            new_map[p] = (s, None)
+            used.add(s)
+            notes.append(f"{s} -> {p} ({why}, similarity {score:.0f})")
+            if decision == "approval":
+                field_reasons[p] = reasons
+                confirm.append(p)
+
+        if len(unfilled) == 1 and len(orphans) == 1:
+            accept(unfilled[0], orphans[0], similarity(unfilled[0], orphans[0]), "only candidate")
         else:
             for p in unfilled:
                 scored = sorted(((similarity(p, s), s) for s in orphans if s not in used), reverse=True)
-                if scored and scored[0][0] >= 75 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 15):
-                    new_map[p] = (scored[0][1], None)
-                    used.add(scored[0][1])
-                    notes.append(f"{scored[0][1]} -> {p} (similarity {scored[0][0]:.0f})")
+                if scored and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 15):
+                    accept(p, scored[0][1], scored[0][0], "best match")
                 else:
                     unresolved.append(p)
 
-        # 3c. Tier 2: only if rules were not sure and there is something to choose from
-        if confirm and self.use_llm:      # let the LLM veto a medium-confidence match
+        # 3b. Tier 2: an LLM picks among existing arguments when the rules are unsure. It sees field
+        #     names and types only - never values - and its picks always need human approval.
+        if confirm and self.use_llm:
             for p in confirm:
                 s = new_map.pop(p)[0]
                 used.discard(s)
                 unresolved.append(p)
+                field_reasons.pop(p, None)
         if unresolved and [s for s in orphans if s not in used]:
             if self.use_llm:
                 tier = "Tier 1 + Tier 2 (LLM)"
                 cand = {s: py_type(args[s]) for s in orphans if s not in used}
-                proposal, tok, note = llm.propose_mapping(td.name, {p: leaves[p] for p in unresolved}, cand, errors)
+                safe_errors = [{"type": e.get("type"), "loc": e.get("loc"), "msg": e.get("msg")} for e in errors]
+                proposal, tok, note = llm.propose_mapping(td.name, {p: leaves[p] for p in unresolved}, cand,
+                                                          safe_errors)
                 out.tokens += tok
                 out.trace.append({"step": "LLM proposed a repair", "ok": bool(proposal),
                                   "detail": {"proposal": proposal, "note": note, "tokens": tok}})
@@ -333,15 +422,19 @@ class SelfHealer:
                         used.add(s)
                         unresolved.remove(p)
                         notes.append(f"{s} -> {p} (LLM)")
+                        if policy.llm_needs_approval:
+                            needs_approval.append(f"{s} -> {p}: proposed by the LLM")
             else:
                 notes.append("LLM tier is off, so ambiguous fields are not guessed")
         out.tier = tier
+        for reasons in field_reasons.values():
+            needs_approval.extend(reasons)
 
         if unresolved:
             return self._stop(out, "cannot fill required field(s) " + ", ".join(unresolved) +
                               " from the agent's data - asking the user instead of guessing")
 
-        # 3d. type conversions for mapped fields
+        # 3c. lossless type conversions only
         for p, (s, _) in list(new_map.items()):
             have, want = py_type(args[s]), leaves[p]
             if have != want:
@@ -351,17 +444,25 @@ class SelfHealer:
                     return self._stop(out, f"cannot convert {s}={args[s]!r} to {want} for {p}: {e}")
                 new_map[p] = (s, want)
                 notes.append(f"{s}: {have} -> {want}")
+                if not policy.auto_type_conversion:
+                    needs_approval.append(f"{s}: {have} -> {want} conversion (tool policy)")
 
-        # 3e. headers from approved config only
+        # 3d. headers from approved config only, never guessed
         header_map = dict(td.header_map)
         for h in missing_headers:
             if h in self.config:
                 header_map[h] = h
                 notes.append(f"header {h} from approved config")
+                if not policy.auto_headers_from_config:
+                    needs_approval.append(f"header {h} (tool policy)")
             else:
                 return self._stop(out, f"API now needs header '{h}' and it is not in approved config")
 
-        candidate = ToolDef(td.name, td.path, td.version + 1, new_map, header_map)
+        if not policy.auto_repair:
+            needs_approval.append(f"tool policy: every repair of {td.name} needs approval")
+
+        candidate = ToolDef(td.name, td.path, td.version + 1, new_map, header_map,
+                            status="canary", origin="auto", owner=agent_id)
         out.trace.append({"step": "Proposed repair", "ok": True,
                           "detail": {"tier": tier, "mapping": notes, "tool": candidate.describe()}})
 
@@ -385,11 +486,22 @@ class SelfHealer:
                           if not problems else {"REJECT": problems}})
         if problems:
             return self._stop(out, "validator rejected the repair: " + "; ".join(problems))
+
+        # 5. policy gate: ambiguous or risky repairs wait for a human instead of being sent
+        if needs_approval:
+            prop = self.registry.propose(td.name, self.registry.current(td.name).version, candidate,
+                                         sorted(set(needs_approval)))
+            out.awaiting = prop
+            out.stop_reason = "held for human approval: " + "; ".join(prop.reasons)
+            out.trace.append({"step": "Held for approval", "ok": False,
+                              "detail": {"proposal": prop.id, "why": prop.reasons,
+                                         "what": "nothing was sent; a reviewer can approve or reject this repair"}})
+            return None
         return candidate
 
     def _log(self, case_id: str, tool: str, td: ToolDef, out: Outcome):
         entry = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "case": case_id, "tool": tool,
-                 "version": f"v{td.version - 1} -> v{td.version}", "tier": out.tier,
+                 "version": f"v{td.version}", "status": td.status, "tier": out.tier,
                  "patch": td.describe(), "tokens": out.tokens}
         out.trace.append({"step": "Patched tool + audit log", "ok": True, "detail": entry})
         if self.log_path:
