@@ -238,3 +238,29 @@ def test_live_gemini_repairs_a_renamed_column(pg_uri, tmp_path, monkeypatch):
     r = experiment(client, engine="gemini")
     ev = client.get("/api/livedb/evidence").json()[0]
     assert r["outcome"] == "recovered" and ev["llm"]["real_request_performed"] and r["business"]["ok"]
+
+
+def test_dashboard_page_renders_every_tab_against_a_real_database(env, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import streamlit as st_
+    from streamlit.testing.v1 import AppTest
+
+    from adaptix.config import get_settings
+    client, st, t = env
+    for k, v in {"ADAPTIX_DB_PATH": "p", "ADAPTIX_SIM_DB_PATH": "s", "ADAPTIX_TEST_DB_PATH": "t",
+                 "ADAPTIX_LIVEDB_DB_PATH": "l"}.items():
+        monkeypatch.setenv(k, str(tmp_path / f"ui-{v}.db"))
+    monkeypatch.setenv("ADAPTIX_MONITOR_ENABLED", "false")
+    get_settings.cache_clear()
+    st_.cache_resource.clear()
+    at = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"), default_timeout=60)
+    at.session_state["_force_page"] = "livedb"
+    at.run()
+    assert not at.exception, at.exception
+    next(b for b in at.button if b.label == "Set up demo schema").click().run()
+    assert not at.exception, at.exception
+    texts = [s.value for s in at.success] + [w.value for w in at.warning]
+    assert any("No schema drift detected" in v or "Schema drift" in v for v in texts), texts
+    get_settings.cache_clear()
+    st_.cache_resource.clear()

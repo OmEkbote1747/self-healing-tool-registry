@@ -7,9 +7,11 @@ import streamlit as st
 
 from views.common import api, go, header, safe_call
 
-ENV_TEXT = {"LIVE_API": "REAL API", "REAL_API_TEST": "REAL API TEST", "SIMULATION": "SIMULATION"}
+ENV_TEXT = {"LIVE_API": "REAL API", "REAL_API_TEST": "REAL API TEST", "SIMULATION": "SIMULATION",
+            "LIVE_DB_DEMO": "LIVE DB DEMO"}
 ENV_PREFIX = {"LIVE_API": "/api", "REAL_API_TEST": "/api/test", "SIMULATION": "/api/sim"}
-RECOVERY_PAGE = {"LIVE_API": "recovery", "REAL_API_TEST": "test_records", "SIMULATION": "sim_records"}
+RECOVERY_PAGE = {"LIVE_API": "recovery", "REAL_API_TEST": "test_records", "SIMULATION": "sim_records",
+                 "LIVE_DB_DEMO": "livedb"}
 REPAIR_ICON = {"Detected": "○", "Analyzed": "◔", "Proposed": "◑", "Validated": "◕", "Applied": "●",
                "Verified": "✔", "Failed": "✖", "Rolled back": "↺", "Requires review": "⚠"}
 FILTER_KEYS = ["chg_q", "chg_env", "chg_type", "chg_status", "chg_ver", "chg_dates", "chg_sort", "chg_order", "chg_page"]

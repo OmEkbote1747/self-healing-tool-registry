@@ -4,7 +4,7 @@ Three separate environments, each with its own database: production (/api, real 
 REAL_API_TEST (/api/test, the controlled test service over real HTTP) and SIMULATION (/api/sim)."""
 import streamlit as st
 
-from views import audit, changes, chaos, drift, evidence, health, monitoring, overview, realtest, recovery, tools
+from views import audit, changes, chaos, drift, evidence, health, livedb, monitoring, overview, realtest, recovery, tools
 from views.common import ROOT, api, api_mode, inject_css, safe_call
 
 REPO_URL = "https://github.com/Paras131206/self-healing-tool-registry"
@@ -42,7 +42,8 @@ def sim_evaluation():
 RENDER = {"overview": overview.render, "monitoring": monitoring.render, "tools": tools.render, "drift": drift.render,
           "recovery": recovery_center, "audit": audit.render, "realtest": realtest.render, "test_records": test_records,
           "chaos": chaos.render, "sim_records": sim_records, "sim_eval": sim_evaluation, "sim_tools": sim_tools,
-          "sim_drift": sim_drift, "changes": changes.render, "evidence": evidence.render, "health": health.render}
+          "sim_drift": sim_drift, "changes": changes.render, "evidence": evidence.render, "health": health.render,
+          "livedb": livedb.render}
 P = st.Page
 pages = {
     "overview": P(overview.render, title="Overview", icon=":material/dashboard:", default=True),
@@ -51,6 +52,7 @@ pages = {
     "drift": P(drift.render, title="Schema Drift Explorer", icon=":material/difference:", url_path="drift"),
     "recovery": P(recovery_center, title="Recovery Center", icon=":material/healing:", url_path="recovery"),
     "audit": P(audit.render, title="Production Audit", icon=":material/fact_check:", url_path="audit"),
+    "livedb": P(livedb.render, title="Live Project Integration", icon=":material/database:", url_path="live-db"),
     "realtest": P(realtest.render, title="Real API Test", icon=":material/lan:", url_path="real-api-test"),
     "test_records": P(test_records, title="Real API Test Records", icon=":material/receipt_long:", url_path="real-api-test-records"),
     "chaos": P(chaos.render, title="Simulation Lab", icon=":material/science:", url_path="simulation-lab"),
@@ -65,6 +67,7 @@ pages = {
 st.session_state["_pages"] = pages
 nav = st.navigation({
     "Production (real APIs)": [pages[k] for k in ("overview", "monitoring", "tools", "drift", "recovery", "audit")],
+    "Live Project Integration (Neon)": [pages["livedb"]],
     "Real API Test (controlled service)": [pages["realtest"], pages["test_records"]],
     "Simulation Lab (simulated)": [pages[k] for k in ("chaos", "sim_records", "sim_eval", "sim_tools", "sim_drift")],
     "Evidence": [pages["changes"], pages["evidence"]],

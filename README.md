@@ -56,6 +56,9 @@ What is never treated as schema drift: 401/403 (credential problems; failover on
 | `adaptix/realtest.py` | the 12-step end-to-end recovery demonstration and the real-HTTP scenario matrix |
 | `adaptix/evidence.py` | evidence records per run, scorecard with denominators, CSV export |
 | `adaptix/changes.py` | the Schema Changes table: rows from stored records, server-side filters, sorting and pagination |
+| `adaptix/livedb.py` | Live Project Integration: PostgreSQL connection (TLS), isolated demo schema with synthetic data, catalog introspection, fault injection, reset |
+| `adaptix/dbrepair.py` | database recovery: SQLSTATE classification, engine selector (Gemini / Local Repair Module), validation, sandbox test, versioned apply, retry, in-transaction verification, rollback, scheduler |
+| `examples/local_repair_module_template.py` | the interface the Local Repair Module must implement |
 | `adaptix/integrations.py` | Integration Health statuses (VERIFIED only from recorded real requests) |
 | `adaptix/verify.py` | task verification (status/echo outputs, or the authoritative response schema for read operations) |
 | `adaptix/api.py` | FastAPI backend: production `/api/*`, simulation `/api/sim/*`, monitoring, integrations, OpenAI adapter |
@@ -119,6 +122,71 @@ Rules:
 - **Polite to providers.** The minimum interval is 5 minutes, there is at most one request per host per second, and a 429's Retry-After is honoured.
 - **Errors are not drift.** Authentication, authorization, quota, network, TLS and business-rule failures are reported with their category and never repaired as schema drift. A rejected key is never altered.
 - **Providers without a schema** are registered with declared fields. These are *not* authoritative: drift cannot be verified, the tool is never repaired, and the page says so.
+
+## Live Project Integration (online PostgreSQL / Neon)
+
+A real database plays the role of the drifting system. The business operation is an `INSERT` of an order. ADAPTIX injects schema faults into an **isolated demo schema with synthetic data**, then recovers the original operation and verifies the stored row. Records are kept apart as **LIVE_DB_DEMO**, with their own database file (`ADAPTIX_LIVEDB_DB_PATH`).
+
+**Setup:**
+
+1. **Create a Neon project** and a dedicated least-privilege role that owns only the demo schemas:
+
+   ```sql
+   CREATE ROLE adaptix_app LOGIN PASSWORD '<strong password>';
+   CREATE SCHEMA adaptix_demo AUTHORIZATION adaptix_app;
+   CREATE SCHEMA adaptix_demo_sandbox AUTHORIZATION adaptix_app;
+   REVOKE CREATE ON SCHEMA public FROM adaptix_app;
+   ```
+
+2. **Set `DATABASE_URL` on the server only.**
+   - Locally: add it to `.streamlit/secrets.toml`, which is git-ignored.
+   - On Streamlit Community Cloud: open the app → **⋮ → Settings → Secrets**, then add
+     `DATABASE_URL = "postgresql://adaptix_app:<password>@<host>/<db>?sslmode=require"`.
+
+   Remote connections must use TLS: `sslmode=require` is added automatically, and weaker modes are refused. The URL is never displayed, logged or exported; only the host, database name and TLS mode are shown.
+
+3. **Optional settings:**
+   - `ADAPTIX_LIVE_DB_SCHEMA` sets the demo schema name. It must match `adaptix_*` (default `adaptix_demo`).
+   - `ADAPTIX_LOCAL_REPAIR_MODULE` is the import path of the Local Repair Module (see `examples/local_repair_module_template.py`).
+
+4. **On the Live Project Integration page:** click **Test connection**, then **Set up demo schema**.
+
+**What the page offers:**
+
+- connection test with least-privilege warnings;
+- table browser with column details and synthetic rows;
+- schema comparison: baseline vs current, with catalog-proven renames;
+- manual fault injection: rename column, change type, add required column, remove column. Each records its exact DDL, before/after columns, time and error;
+- scheduled injection with an interval, enable/disable and a run limit, optionally followed by a recovery run;
+- reset to baseline, with confirmation;
+- read-only schema monitoring, separate from the experiments;
+- evidence export.
+
+**Recovery experiment** (per-experiment engine: **Gemini**, the existing Flash-Lite model, or the **Local Repair Module**):
+
+1. **Execute and verify.** The INSERT and the read-back run in one transaction.
+2. **Classify.** Errors are classified by SQLSTATE. Auth, permission, timeout, connection and constraint errors are never treated as drift.
+3. **Diagnose.** The catalog is diffed against the tool's registered schema. A rename is proven when the column keeps its catalog `attnum`.
+4. **Propose.** The selected engine proposes a repair. An unavailable engine stops the run, and ADAPTIX never switches engines or invents output.
+5. **Validate.** The same independent validator as the API pipeline checks the proposal.
+6. **Sandbox test.** The repaired operation runs in the sandbox schema on a copied table structure, and that transaction is always rolled back.
+7. **Apply.** The repair is applied to the demo tool as a new registry version.
+8. **Retry and verify.** The operation is retried with bounded retries and the same idempotency key, and committed only if the business read-back matches.
+9. **Roll back on failure.** The transaction is rolled back and the registry restored.
+
+The results show phase timings, the patch diff, validation checks and statistics with denominators.
+
+**Measured on 2026-10-16** (embedded PostgreSQL 16, real Gemini, one run each):
+
+| Fault | Outcome |
+|---|---|
+| rename `customer_id → client_id` | recovered and verified. Gemini proposed the mapping, which was validated, sandbox-tested and applied (v1 → v2). The row was stored and confirmed. Gemini took about 9 s of the 9.05 s total. |
+| `quantity` integer → text | no failure: PostgreSQL coerces the value on INSERT. This is recorded as a success, not an incident, and monitoring still reports the type change. |
+| `note` → jsonb | stopped: no lossless conversion exists. |
+| add required column `channel` | stopped: no trusted value (Gemini was asked and correctly proposed none). |
+| remove column `note` | stopped: the caller's value would be silently dropped. |
+
+**Not tested against Neon itself:** no Neon credentials were available while building this. Every database test ran against a real local PostgreSQL 16 server (`pgserver`).
 
 ## Real API Test: a controlled, reproducible recovery
 
@@ -265,6 +333,7 @@ python -m pytest -q          # 211 passed, 5 skipped (2026-10-16); the 5 skipped
 | Mocked integration tests | `test_api.py`, `test_monitoring.py` | the full API with a fake network layer (`tests/fakes.py`) standing in for an approved HTTPS provider |
 | **Controlled real HTTP API tests** | `test_realtest.py` | a real uvicorn server on 127.0.0.1, real TCP requests through the guard; no internet or key needed. Model behaviour comes from the labelled test double |
 | **External live tests** (opt-in) | `test_gemini_live.py` (needs `GEMINI_API_KEY`), `test_live_api.py` (needs `ADAPTIX_LIVE_API_TESTS=1`) | real Gemini requests, including the end-to-end demo, and read-only calls to the public Swagger Petstore. All 5 passed on 2026-10-16 |
+| **Real PostgreSQL tests** | `test_livedb.py` | a real PostgreSQL 16 server started by `pgserver` (no internet): injection, recovery, rollback, engines, scheduler, redaction, the dashboard page. One live variant uses real Gemini when `GEMINI_API_KEY` is set |
 | Dashboard smoke tests | `test_ui.py` | every page renders; Changes table filters, empty state and clear filters |
 
 ```bash

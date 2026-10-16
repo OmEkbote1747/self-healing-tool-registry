@@ -5,7 +5,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 PAGES = ["overview", "monitoring", "tools", "drift", "recovery", "audit", "realtest", "test_records", "chaos",
-         "sim_records", "sim_eval", "sim_tools", "sim_drift", "changes", "evidence", "health"]
+         "sim_records", "sim_eval", "sim_tools", "sim_drift", "changes", "evidence", "health", "livedb"]
 
 
 @pytest.fixture(autouse=True)
@@ -13,6 +13,8 @@ def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setenv("ADAPTIX_DB_PATH", str(tmp_path / "ui.db"))
     monkeypatch.setenv("ADAPTIX_SIM_DB_PATH", str(tmp_path / "ui-sim.db"))
     monkeypatch.setenv("ADAPTIX_TEST_DB_PATH", str(tmp_path / "ui-test.db"))
+    monkeypatch.setenv("ADAPTIX_LIVEDB_DB_PATH", str(tmp_path / "ui-livedb.db"))
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setenv("ADAPTIX_MONITOR_ENABLED", "false")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     from adaptix.config import get_settings

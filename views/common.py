@@ -78,9 +78,13 @@ def _client():
 
 @st.cache_resource(show_spinner=False, max_entries=1)
 def _client_for(code_version: str):
+    import os
     import sys
-    for m in [m for m in sys.modules if m == "adaptix" or m.startswith("adaptix.")]:
-        del sys.modules[m]                       # load the current backend code, not a stale copy
+    previous = os.environ.get("ADAPTIX_LOADED_CODE_VERSION")      # survives Streamlit's module reloads
+    if previous and previous != code_version:                    # the backend code changed since the last build
+        for m in [m for m in sys.modules if m == "adaptix" or m.startswith("adaptix.")]:
+            del sys.modules[m]                   # load the current backend code, not a stale copy
+    os.environ["ADAPTIX_LOADED_CODE_VERSION"] = code_version
     from adaptix.config import get_settings
     s = get_settings()
     headers = {"Authorization": f"Bearer {s.admin_token}"}

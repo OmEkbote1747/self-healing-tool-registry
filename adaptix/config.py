@@ -12,6 +12,8 @@ def env(name: str, default: str | None = None) -> str | None:
     """Environment first, then Streamlit secrets (Streamlit Cloud), else default."""
     if os.environ.get(name) not in (None, ""):
         return os.environ[name]
+    if os.environ.get("ADAPTIX_IGNORE_STREAMLIT_SECRETS") == "1":     # tests: never read a developer's local secrets
+        return default
     try:
         import streamlit as st
         if name in st.secrets:
