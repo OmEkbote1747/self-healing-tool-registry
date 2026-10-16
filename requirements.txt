@@ -5,8 +5,7 @@ pydantic==2.14.1
 rapidfuzz==3.14.6
 jsonschema==4.26.0
 pandas==3.0.6
-anthropic==1.13.0
 
-# middleware service
+# API server
 uvicorn==0.54.0
 google-genai==2.31.0
