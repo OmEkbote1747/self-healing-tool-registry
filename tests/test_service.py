@@ -4,10 +4,10 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from selfheal.client import SchemaHealClient
-from selfheal.mock_api import make_app
-from selfheal.service import Principal, create_app
-from selfheal.transport import Transport
+from adaptix.client import SchemaHealClient
+from adaptix.mock_api import make_app
+from adaptix.service import Principal, create_app
+from adaptix.transport import Transport
 
 KEYS = {"a-agent": Principal("acme", "agent"), "a-rev": Principal("acme", "reviewer"),
         "g-agent": Principal("globex", "agent")}
@@ -100,5 +100,5 @@ def test_traces_returned_by_api_are_redacted(env):
     upstreams["http://up"] = make_app("/u", {"userId": "str"}, ["x-api-key"])
     agent.register_tool("update_user", "http://up", "/u", {"user_id": "str"})
     res = agent.call("update_user", {"user_id": "7"})
-    from selfheal.cases import APPROVED_CONFIG
+    from adaptix.cases import APPROVED_CONFIG
     assert APPROVED_CONFIG["x-api-key"] not in json.dumps(res)

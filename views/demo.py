@@ -1,9 +1,9 @@
 import streamlit as st
 from fastapi.testclient import TestClient
 
-from selfheal.cases import APPROVED_CONFIG, DEMO_CASE, build_cases, build_stress_cases
-from selfheal.healer import ConflictError, NaiveRetryAgent, SelfHealer
-from selfheal.mock_api import make_app
+from adaptix.cases import APPROVED_CONFIG, DEMO_CASE, build_cases, build_stress_cases
+from adaptix.healer import ConflictError, NaiveRetryAgent, SelfHealer
+from adaptix.mock_api import make_app
 from views.common import LOG, footer, page_header, session_registry, show_trace, use_llm
 
 

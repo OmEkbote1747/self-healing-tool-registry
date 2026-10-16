@@ -9,3 +9,4 @@ anthropic==1.13.0
 
 # middleware service
 uvicorn==0.54.0
+google-genai==2.31.0

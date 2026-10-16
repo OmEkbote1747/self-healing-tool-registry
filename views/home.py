@@ -78,7 +78,7 @@ def render():
 
     section("Against a stronger baseline", "Same 125 cases. An agent that reads the errors and repairs greedily "
             "recovers more often on its own, but sends wrong requests.")
-    from selfheal.bench import compare
+    from adaptix.bench import compare
     from views.common import cached_benchmark
     st.dataframe(compare(cached_benchmark()), hide_index=True, use_container_width=True)
     st.markdown('<div class="sh-note"><b>Honest limits.</b> This is a prototype, not general self-healing. All test '

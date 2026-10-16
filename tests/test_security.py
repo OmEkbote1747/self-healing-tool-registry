@@ -3,11 +3,11 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-from selfheal import llm
-from selfheal.cases import APPROVED_CONFIG, DEMO_CASE
-from selfheal.healer import SelfHealer, ToolRegistry
-from selfheal.mock_api import make_app
-from selfheal.security import MASK, purge_audit_log, redact, redact_headers, redact_reply
+from adaptix import llm
+from adaptix.cases import APPROVED_CONFIG, DEMO_CASE
+from adaptix.healer import SelfHealer, ToolRegistry
+from adaptix.mock_api import make_app
+from adaptix.security import MASK, purge_audit_log, redact, redact_headers, redact_reply
 
 
 def test_redaction_rules():

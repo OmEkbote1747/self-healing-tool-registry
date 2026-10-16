@@ -2,9 +2,9 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from selfheal.cases import APPROVED_CONFIG
-from selfheal.healer import SelfHealer, ToolRegistry
-from selfheal.mock_api import make_app
+from adaptix.cases import APPROVED_CONFIG
+from adaptix.healer import SelfHealer, ToolRegistry
+from adaptix.mock_api import make_app
 
 
 def run(path, v1, v2, args, method="POST", **app_kw):

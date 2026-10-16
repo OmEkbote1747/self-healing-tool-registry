@@ -1,10 +1,10 @@
 """SchemaHeal: Streamlit front end for the PS-01 self-healing tool registry prototype."""
 import streamlit as st
 
-from selfheal import llm
-from selfheal.cases import APPROVED_CONFIG
+from adaptix import llm
+from adaptix.cases import APPROVED_CONFIG
 from views import api, benchmark, demo, home, how, registry, stress
-from selfheal.security import purge_audit_log
+from adaptix.security import purge_audit_log
 from views.common import LOG, REPO_URL, ROOT, inject_css
 import os
 

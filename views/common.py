@@ -11,7 +11,7 @@ DB = ROOT / "logs" / "registry.db"
 def session_registry():
     """A durable registry scoped to this browser session (its own tenant), so visitors never see each other."""
     import uuid
-    from selfheal.store import SqliteRegistry
+    from adaptix.store import SqliteRegistry
     tenant = st.session_state.setdefault("tenant", "session-" + uuid.uuid4().hex[:8])
     return SqliteRegistry(DB, tenant=tenant)
 APP_NAME = "SchemaHeal"
@@ -145,20 +145,20 @@ def show_trace(trace):
 
 @st.cache_data(show_spinner="Running the 125-case benchmark…")
 def cached_benchmark():
-    from selfheal.bench import run_benchmark
+    from adaptix.bench import run_benchmark
     return run_benchmark(use_llm=False)
 
 
 @st.cache_data(show_spinner="Running stress tests…")
 def cached_stress():
-    from selfheal.bench import run_benchmark
+    from adaptix.bench import run_benchmark
     return run_benchmark(use_llm=False, stress=True)
 
 
 def headline_numbers():
     """Live numbers from the benchmark, mapped to the PS-01 metric names."""
     import statistics
-    from selfheal.bench import rates
+    from adaptix.bench import rates
     rows = cached_benchmark()
     n = rates(rows)
     n["mttr_ms"] = statistics.median(r["recovery_ms"] for r in rows if r["recovery_ms"] is not None)

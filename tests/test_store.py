@@ -1,7 +1,7 @@
 import threading
 
-from selfheal.healer import ConflictError, ToolDef
-from selfheal.store import SqliteRegistry
+from adaptix.healer import ConflictError, ToolDef
+from adaptix.store import SqliteRegistry
 
 
 def test_tenants_are_isolated(tmp_path):

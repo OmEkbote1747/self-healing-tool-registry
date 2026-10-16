@@ -1,6 +1,6 @@
 """Minimal Python SDK for the SchemaHeal middleware API.
 
-    from selfheal.client import SchemaHealClient
+    from adaptix.client import SchemaHealClient
     sh = SchemaHealClient("http://localhost:8000", api_key="...")
     sh.register_tool("update_user", base_url="https://api.example.com", path="/users/update",
                      arg_schema={"user_id": "str", "email": "str"})

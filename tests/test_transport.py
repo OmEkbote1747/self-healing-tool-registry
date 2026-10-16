@@ -8,10 +8,10 @@ import pytest
 import uvicorn
 from fastapi.testclient import TestClient
 
-from selfheal.cases import APPROVED_CONFIG, build_cases
-from selfheal.healer import SelfHealer, ToolRegistry
-from selfheal.mock_api import make_app
-from selfheal.transport import Transport
+from adaptix.cases import APPROVED_CONFIG, build_cases
+from adaptix.healer import SelfHealer, ToolRegistry
+from adaptix.mock_api import make_app
+from adaptix.transport import Transport
 
 CASE = next(c for c in build_cases() if c.note == "user_id -> userId")
 

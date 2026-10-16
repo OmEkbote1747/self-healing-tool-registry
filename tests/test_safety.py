@@ -1,11 +1,11 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from selfheal.bench import rates, run_benchmark
-from selfheal.cases import APPROVED_CONFIG, DEMO_CASE
-from selfheal.healer import ConflictError, SelfHealer, ToolRegistry
-from selfheal.mock_api import make_app
-from selfheal.policy import PolicySet, RepairPolicy
+from adaptix.bench import rates, run_benchmark
+from adaptix.cases import APPROVED_CONFIG, DEMO_CASE
+from adaptix.healer import ConflictError, SelfHealer, ToolRegistry
+from adaptix.mock_api import make_app
+from adaptix.policy import PolicySet, RepairPolicy
 
 
 @pytest.mark.parametrize("src,dst,score,expected", [
@@ -30,7 +30,7 @@ def registry_kind(request, tmp_path):
 
 def _new_registry():
     if _KIND == "sqlite":
-        from selfheal.store import SqliteRegistry
+        from adaptix.store import SqliteRegistry
         return SqliteRegistry(_DB, tenant="t1")
     return ToolRegistry()
 
@@ -70,7 +70,7 @@ def test_stale_proposal_is_refused():
 
 
 def test_tool_policy_can_require_approval_for_everything():
-    from selfheal.cases import build_cases
+    from adaptix.cases import build_cases
     case = next(c for c in build_cases() if c.note == "user_id -> userId")
     client, reg, healer = _setup(case, PolicySet(per_tool={case.tool: {"auto_repair": False}}))
     out = healer.call(client, case.tool, case.args)
@@ -79,7 +79,7 @@ def test_tool_policy_can_require_approval_for_everything():
 
 
 def test_canary_is_private_until_promoted():
-    from selfheal.cases import build_cases
+    from adaptix.cases import build_cases
     case = next(c for c in build_cases() if c.note == "user_id -> userId")
     client, reg, healer = _setup(case)
     a = healer.call(client, case.tool, case.args, agent_id="agent-A")
@@ -92,7 +92,7 @@ def test_canary_is_private_until_promoted():
 
 
 def test_failing_canary_is_rolled_back():
-    from selfheal.cases import build_cases
+    from adaptix.cases import build_cases
     case = next(c for c in build_cases() if c.note == "user_id -> userId")
     client, reg, healer = _setup(case)
     healer.call(client, case.tool, case.args, agent_id="agent-A")

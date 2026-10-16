@@ -1,6 +1,6 @@
 import streamlit as st
 
-from selfheal.healer import ConflictError
+from adaptix.healer import ConflictError
 from views.common import LOG, footer, page_header
 
 

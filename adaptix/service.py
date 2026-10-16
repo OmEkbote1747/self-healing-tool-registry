@@ -1,6 +1,6 @@
 """SchemaHeal middleware API: agents call their tools through this service instead of the API directly.
 
-Run:   SCHEMAHEAL_API_KEYS="acme:agent:KEY1,acme:reviewer:KEY2" uvicorn selfheal.service:app
+Run:   SCHEMAHEAL_API_KEYS="acme:agent:KEY1,acme:reviewer:KEY2" uvicorn adaptix.service:app
 Docs:  /docs (OpenAPI)
 
 Auth:  "Authorization: Bearer <key>". Each key belongs to one tenant and one role:

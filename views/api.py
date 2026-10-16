@@ -9,7 +9,7 @@ def render():
                 "HTTP; the first integration target is OpenAI-compatible function calling.")
     st.subheader("Run the service")
     st.code('SCHEMAHEAL_API_KEYS="acme:agent:AGENT_KEY,acme:reviewer:REVIEW_KEY" \\\n'
-            '  uvicorn selfheal.service:app --port 8000      # docs at http://localhost:8000/docs', language="bash")
+            '  uvicorn adaptix.service:app --port 8000      # docs at http://localhost:8000/docs', language="bash")
     st.subheader("Endpoints")
     st.dataframe({
         "Method": ["POST", "GET", "POST", "GET", "POST", "GET", "POST", "POST", "POST", "PUT", "GET"],
@@ -28,7 +28,7 @@ def render():
                          "per-tool policy, e.g. auto_repair=false for payments", "tenant audit events"]},
         hide_index=True, use_container_width=True)
     st.subheader("OpenAI-compatible agent loop")
-    st.code('''from selfheal.client import SchemaHealClient
+    st.code('''from adaptix.client import SchemaHealClient
 sh = SchemaHealClient("http://localhost:8000", api_key=AGENT_KEY)
 sh.register_tool("update_user", base_url="https://api.example.com", path="/users/update",
                  arg_schema={"user_id": "str", "email": "str"})

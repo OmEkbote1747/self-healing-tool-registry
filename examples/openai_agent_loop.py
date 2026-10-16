@@ -7,7 +7,7 @@ tool call it makes is executed (and, where safe, repaired) by SchemaHeal.
 """
 import os
 
-from selfheal.client import SchemaHealClient
+from adaptix.client import SchemaHealClient
 
 sh = SchemaHealClient(os.environ.get("SCHEMAHEAL_URL", "http://localhost:8000"), os.environ["SCHEMAHEAL_KEY"])
 tools = sh.openai_tools()

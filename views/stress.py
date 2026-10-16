@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 
-from selfheal.bench import rates, run_benchmark
+from adaptix.bench import rates, run_benchmark
 from views.common import footer, kpis, page_header, use_llm
 
 

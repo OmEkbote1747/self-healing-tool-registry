@@ -50,18 +50,18 @@ agent ──► SchemaHeal (Streamlit console or middleware API)
 
 | File | What it does |
 |---|---|
-| `selfheal/healer.py` | orchestration: diagnose, map, convert, validate, gate, patch, retry once |
-| `selfheal/policy.py` | repair policy: confidence thresholds, entity and unit checks, per-tool overrides |
-| `selfheal/schema.py` | OpenAPI operation reader (methods, params, optional/enum/array/union/format fields) |
-| `selfheal/transport.py` | timeouts, pooling, rate limit, circuit breaker, retry budget, idempotency, replay rules |
-| `selfheal/store.py` | durable tenant-scoped registry: versions, proposals, policies, events (SQLite) |
-| `selfheal/security.py` | redaction, secrets from the environment, audit retention |
-| `selfheal/llm.py` | optional Tier 2: an LLM picks which existing argument fits (never values; always reviewed) |
-| `selfheal/service.py` | middleware API with tenant keys and roles, review queue, OpenAI tool-calling adapter |
-| `selfheal/client.py` | Python SDK for the service |
-| `selfheal/baselines.py` | retry-loop and greedy error-reading baselines |
-| `selfheal/mock_api.py` | mock API with schema drift, idempotency, fault injection |
-| `selfheal/cases.py`, `fixtures/` | 125 planned cases, 10 stress cases, 30 adversarial JSON fixtures |
+| `adaptix/healer.py` | orchestration: diagnose, map, convert, validate, gate, patch, retry once |
+| `adaptix/policy.py` | repair policy: confidence thresholds, entity and unit checks, per-tool overrides |
+| `adaptix/schema.py` | OpenAPI operation reader (methods, params, optional/enum/array/union/format fields) |
+| `adaptix/transport.py` | timeouts, pooling, rate limit, circuit breaker, retry budget, idempotency, replay rules |
+| `adaptix/store.py` | durable tenant-scoped registry: versions, proposals, policies, events (SQLite) |
+| `adaptix/security.py` | redaction, secrets from the environment, audit retention |
+| `adaptix/llm.py` | optional Tier 2: an LLM picks which existing argument fits (never values; always reviewed) |
+| `adaptix/service.py` | middleware API with tenant keys and roles, review queue, OpenAI tool-calling adapter |
+| `adaptix/client.py` | Python SDK for the service |
+| `adaptix/baselines.py` | retry-loop and greedy error-reading baselines |
+| `adaptix/mock_api.py` | mock API with schema drift, idempotency, fault injection |
+| `adaptix/cases.py`, `fixtures/` | 125 planned cases, 10 stress cases, 30 adversarial JSON fixtures |
 | `app.py`, `views/` | Streamlit console (landing page, demo, benchmark, review queue, API docs) |
 
 ## Run it
@@ -70,9 +70,9 @@ agent ──► SchemaHeal (Streamlit console or middleware API)
 python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 .venv/bin/streamlit run app.py                     # console
 .venv/bin/python -m pytest -q                      # 76 tests
-.venv/bin/python -m selfheal.bench                 # all suites, three agents
+.venv/bin/python -m adaptix.bench                 # all suites, three agents
 SCHEMAHEAL_API_KEYS="acme:agent:AGENT_KEY,acme:reviewer:REVIEW_KEY" \
-  .venv/bin/uvicorn selfheal.service:app --port 8000   # middleware API, docs at /docs
+  .venv/bin/uvicorn adaptix.service:app --port 8000   # middleware API, docs at /docs
 ```
 
 Secrets: header values come from `SCHEMAHEAL_SECRET_<NAME>` environment variables (e.g.
@@ -81,7 +81,7 @@ Secrets: header values come from `SCHEMAHEAL_SECRET_<NAME>` environment variable
 ## Middleware API (first integration target: OpenAI-compatible function calling)
 
 ```python
-from selfheal.client import SchemaHealClient
+from adaptix.client import SchemaHealClient
 sh = SchemaHealClient("http://localhost:8000", api_key=AGENT_KEY)
 sh.register_tool("update_user", base_url="https://api.example.com", path="/users/update",
                  arg_schema={"user_id": "str", "email": "str"})
