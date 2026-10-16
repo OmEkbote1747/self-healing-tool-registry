@@ -15,8 +15,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 MASK = "***"
-SENSITIVE = re.compile(r"(auth|api[-_]?key|token|secret|password|passwd|cookie|session|signature|ssn|"
-                       r"card|cvv|iban|account[-_]?number|pin\b|otp)", re.I)
+SENSITIVE = re.compile(r"(auth|api[-_]?key|^token$|[-_]token$|^bearer|secret|password|passwd|cookie|"
+                       r"session[-_]?(id|key|token)?$|signature|ssn|card|cvv|iban|account[-_]?number|\bpin\b|otp)", re.I)
 SAFE_HEADERS = {"content-type", "accept", "x-client-version", "idempotency-key"}
 
 

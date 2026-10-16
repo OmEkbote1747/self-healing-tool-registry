@@ -83,9 +83,13 @@ def make_app(path: str, fields: dict, headers: list[str] | None = None, title: s
     body_model = _build_model("Body_" + base, body_fields) if body_fields else None
     query_model = _build_model("Query_" + base, query_fields, strict=False) if query_fields else None
     path_model = _build_model("Path_" + base, path_fields, strict=False) if path_fields else None
+    def _doc(key, text):
+        old = resp_cfg.get(f"{key}_renamed_from")
+        return Field(..., description=text + (f" (formerly {old})" if old else ""),
+                     json_schema_extra={"x-renamed-from": old} if old else None)
     response_model = create_model("Response_" + base, **{
-        resp_cfg["status_field"]: (str, Field(..., description="Outcome of the operation")),
-        resp_cfg["echo_field"]: (dict, Field(..., description="The data the API applied"))})
+        resp_cfg["status_field"]: (str, _doc("status", "Outcome of the operation")),
+        resp_cfg["echo_field"]: (dict, _doc("echo", "The data the API applied"))})
 
     app = FastAPI(title=title + " (simulated)")
     app.state.effects = 0                 # how many times the side effect really happened
