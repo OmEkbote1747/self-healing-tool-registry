@@ -1,79 +1,133 @@
-"""Evidence & Scorecard: inspect and export judge-verifiable records per environment."""
+"""Evidence & Scorecard: honest pipeline counts, one selected incident in detail, audit history and exports."""
 import json
 
 import pandas as pd
 import streamlit as st
 
-from views.common import api, header, kpis, safe_call
-
-ENVS = {"REAL_API_TEST": ("/api/test", "REAL API TEST"), "LIVE_API": ("/api", "REAL API"),
-        "SIMULATION": ("/api/sim", "SIMULATION"), "LIVE_DB_DEMO": ("/api/livedb", "LIVE DB DEMO")}
+from views.common import ENV_PREFIX, api, badge, env_picker, fmt_ms, header, safe_call
 
 
-def _pct(v, d):
-    return "—" if v is None else f"{v:.0f}% ({d})"
+def _scorecard(sc: dict):
+    p = sc["pipeline"]
+    rows = [("Incidents recorded", p["incidents"], "failed calls that needed attention"),
+            ("Schema drift detected", p["detected_drift"], "confirmed against the authoritative schema"),
+            ("Repairs proposed", p["proposed_repairs"], "a proposal is not a repair"),
+            ("Patches validated", p["validated_patches"], "accepted by independent validation"),
+            ("Patches applied", p["applied_patches"], "new tool version written"),
+            ("Verified recoveries", p["verified_recoveries"], "original task verified after the patch"),
+            ("Stopped safely", p["refused_or_stopped"], "unsafe or not repairable: nothing applied"),
+            ("Failures", p["failures"], "pipeline errors"),
+            ("Rollbacks", p["rollbacks"], "patch reverted after failed verification")]
+    st.dataframe(pd.DataFrame(rows, columns=["stage", "count", "meaning"]), hide_index=True, use_container_width=True)
+    lat = p["latency"]
+    st.caption((f"Median verified recovery {fmt_ms(lat['median_ms'])} over {lat['n']} recoveries"
+                + (f" · p90 {fmt_ms(lat['p90_ms'])}" if lat["p90_ms"] else "") + (f" · {lat['note']}" if lat["note"] else ""))
+               if lat["n"] else "No verified recoveries yet, so no recovery time is reported.")
+    st.caption(sc["disclosure"])
+
+
+def _patch(prefix: str, inc: dict):
+    vers = safe_call(api, "GET", f"{prefix}/tools/{inc['tool']}/versions") or []
+    v = next((x for x in vers if x.get("incident_id") == inc["id"]), None)
+    if not v or not v.get("patch"):
+        st.caption("No patch was applied for this incident.")
+        return
+    lines = []
+    for p in v["patch"]:
+        what = p.get("argument") or p.get("header") or p.get("output")
+        lines += [f"- {what}: {p.get('from') or '(none)'}",
+                  f"+ {what}: {p.get('to') or p.get('credential_group') or '(removed)'}"
+                  + (f"  [{p['transform']}]" if p.get("transform") not in (None, "none") else "")]
+    st.code("\n".join(lines), language="diff")
+    st.caption(f"Tool v{v.get('parent_version')} → v{v['version']} · current status of that version: **{v['status']}**")
+
+
+def _selected(prefix: str, inc: dict):
+    from views.recovery import phase_strip
+    with st.container(border=True):
+        st.markdown(f"### {badge(inc['status'])} &nbsp; `{inc['tool']}`", unsafe_allow_html=True)
+        st.caption(f"{inc.get('environment') or ''} · {inc['category'].replace('_', ' ')} · started "
+                   f"{inc['started_at'][:19].replace('T', ' ')} UTC · duration {fmt_ms(inc['duration_ms'])} · "
+                   f"retries {inc['retries']} · schema `{inc.get('old_signature') or '—'}` → `{inc.get('new_signature') or '—'}`"
+                   + (f" · engine {inc['llm'].get('provider')} ({'real request' if inc['llm'].get('real') else 'not a real request'})"
+                      if inc.get("llm") else " · engine: rules"))
+        st.write(inc["reason"] or "")
+        phase_strip(inc)
+        c1, c2 = st.columns(2, gap="large")
+        with c1:
+            st.markdown("**Field-level changes**")
+            if inc.get("drift"):
+                d = inc["drift"]
+                st.dataframe([{"change": c["kind"].replace("_", " "), "field": c["location"], "before": c.get("old") or "—",
+                               "after": c.get("new") or "—"} for c in d["request_changes"] + d["response_changes"]],
+                             hide_index=True, use_container_width=True)
+            else:
+                st.caption("No schema drift: this incident was not a schema problem.")
+            st.markdown("**Patch applied**")
+            _patch(prefix, inc)
+        with c2:
+            v = inc.get("validation")
+            st.markdown("**Validation**: " + ("not reached" if not v else "accepted" if v["accepted"] else "rejected"))
+            if v:
+                with st.expander("Validation checks"):
+                    st.dataframe(pd.DataFrame(v["checks"]), hide_index=True, use_container_width=True)
+            ver = inc.get("verification")
+            st.markdown("**Verification**: " + ("not reached" if not ver else "verified" if ver.get("ok") else "failed"))
+            for c in (ver or {}).get("checks", []):
+                st.markdown(f"{'✅' if c.get('ok') else '❌'} {c.get('name')} {('· ' + c['detail']) if c.get('detail') else ''}")
+            st.markdown("**Rollback**: " + ("performed" if inc.get("rolled_back") else
+                                            "attempted, not possible" if any(s["stage"] == "rollback" for s in inc["timeline"])
+                                            else "not needed"))
+        with st.expander("Raw incident record (redacted)"):
+            st.json(inc, expanded=False)
 
 
 def render():
-    header("Evidence & Scorecard", "Judge-verifiable records",
-           "One evidence record per run: environment, API, schema before/after, request and response (redacted), "
-           "classification, diff, Gemini usage, proposal, validation, applied change, retries, verification, rollback "
-           "and timing. Rates always show their denominators.")
-    env = st.radio("Environment", list(ENVS), horizontal=True, format_func=lambda e: ENVS[e][1], key="ev_env")
-    prefix, label = ENVS[env]
+    header("Evidence & Scorecard", "What actually happened, from stored records",
+           "Counts and details come from the same incident records every page reads. Pick an incident to see its "
+           "timeline, field-level changes, the patch, validation, verification and rollback.")
+    env = env_picker("ev_env")
+    prefix = ENV_PREFIX[env]
     sc = safe_call(api, "GET", f"{prefix}/scorecard")
-    recs = safe_call(api, "GET", f"{prefix}/evidence", params={"limit": 500})
-    if sc is None or recs is None:
+    incs = safe_call(api, "GET", f"{prefix}/incidents", params={"limit": 300})
+    if sc is None or incs is None:
         return
-    st.info(sc["disclosure"], icon=":material/info:")
-    kpis([("Eligible incidents", sc["eligible_incidents"], "runs where a repair was the correct outcome"),
-          ("Verified recoveries", _pct(sc["verified_recovery_rate"], f"{sc['verified_recoveries']}/{sc['eligible_incidents']}"),
-           "task outcome verified, not just HTTP 200"),
-          ("Unsafe repairs accepted", sc["unsafe_repairs_accepted"], f"of {sc['records']} runs"),
-          ("False-positive drift", sc["false_positive_drift"], f"of {sc['false_positive_denominator']} runs with a known category")])
-    lat = sc["latency"]
-    kpis([("Repairs applied", sc["repairs_applied"], f"{sc['successful_repairs']} succeeded · {sc['failed_repairs']} failed"),
-          ("Rejected proposals", sc["rejected_repairs"], "stopped by independent validation"),
-          ("Rollback success", _pct(sc["rollback_success_rate"], sc["rollbacks_attempted"]), "rollbacks needed"),
-          ("Median recovery", "—" if lat["median_ms"] is None else f"{lat['median_ms']:.0f} ms",
-           lat["note"] or (f"p90 {lat['p90_ms']} ms" + (f" · p95 {lat['p95_ms']} ms" if lat["p95_ms"] else "")))])
-    st.caption(f"Real Gemini requests in these runs: {sc['real_llm_requests']}")
-    e1, e2 = st.columns(2)
+    st.subheader("Scorecard")
+    _scorecard(sc)
+    st.subheader("Incidents")
+    if not incs:
+        st.info(f"No incidents recorded in {env} yet. Run the Drift Demo, or call a registered API.", icon=":material/inbox:")
+    else:
+        ids = [i["id"] for i in incs]
+        want = st.session_state.get("ev_pick")
+        labels = {i["id"]: f"{i['started_at'][:19].replace('T', ' ')} · {i['tool']} · {i['status']} · "
+                           f"{i['category'].replace('_', ' ')}" + ("" if i.get("healing", True) else " · comparison run")
+                  for i in incs}
+        pick = st.selectbox("Incident", ids, index=ids.index(want) if want in ids else 0, format_func=labels.get,
+                            key=f"ev_inc_{env}")
+        _selected(prefix, next(i for i in incs if i["id"] == pick))
+    with st.expander("Audit history"):
+        ev = safe_call(api, "GET", f"{prefix}/audit", params={"limit": 300}) or []
+        if ev:
+            st.dataframe(pd.DataFrame([{"time": e["ts"][:19].replace("T", " "), "event": e["kind"], "tool": e["tool"],
+                                        "correlation": (e["correlation_id"] or "")[:12],
+                                        "details": json.dumps(e["data"], default=str)[:140]} for e in ev]),
+                         hide_index=True, use_container_width=True,
+                         column_config={"details": st.column_config.TextColumn(width="large")})
+            st.caption("Payloads are redacted before they are stored: no credentials, authorization headers or tokens.")
+        else:
+            st.caption("No audit events yet.")
+    with st.expander("Schema change log"):
+        from views.changes import render_table
+        render_table([{"REAL API": "LIVE_API", "REAL API TEST": "REAL_API_TEST", "SIMULATION": "SIMULATION"}[env]],
+                     key=f"ev-chg-{env}")
     bundle = safe_call(api, "GET", f"{prefix}/evidence/export.json")
     csv_text = safe_call(api, "GET", f"{prefix}/evidence/export.csv")
-    if bundle is not None:
-        e1.download_button("Export evidence bundle (JSON)", json.dumps(bundle, indent=2, default=str),
-                           f"adaptix-evidence-{env.lower()}.json", "application/json", icon=":material/download:",
-                           disabled=not recs)
-    if csv_text is not None:
-        e2.download_button("Export report (CSV)", csv_text if isinstance(csv_text, str) else str(csv_text),
-                           f"adaptix-evidence-{env.lower()}.csv", "text/csv", icon=":material/table:", disabled=not recs)
-    if not recs:
-        st.info(f"No {label} evidence recorded yet.", icon=":material/inbox:")
-        return
-    if sc["by_scenario"]:
-        st.subheader("By scenario")
-        st.dataframe(pd.DataFrame([{"scenario": k, **{x: y for x, y in v.items() if x != "environments"}}
-                                   for k, v in sc["by_scenario"].items()]), hide_index=True, use_container_width=True)
-    st.subheader("Records")
-    df = pd.DataFrame([{"evidence": r["evidence_id"], "recorded": r["recorded_at"][:19].replace("T", " "),
-                        "scenario": r.get("scenario"), "tool": r["api"]["tool"], "classification":
-                        r["first_failure"]["classification"], "Gemini": "REAL" if r["llm"]["real_request_performed"]
-                        else ("used (not real)" if r["llm"]["used"] else "not used"),
-                        "outcome": r["final"]["outcome"], "verified": r["final"]["verified_recovery"],
-                        "as expected": r["expected"]["matches"], "elapsed ms": r["timing"]["elapsed_ms"]} for r in recs])
-    sel = st.dataframe(df, hide_index=True, use_container_width=True, on_select="rerun", selection_mode="single-row",
-                       key="ev-table")
-    rows = (sel.selection.rows if sel and hasattr(sel, "selection") else []) or []
-    want = st.session_state.pop("ev_pick", None)
-    idx = rows[0] if rows else next((i for i, r in enumerate(recs) if r["evidence_id"] == want), None)
-    if idx is None:
-        st.caption("Select a record to inspect it.")
-        return
-    r = recs[idx]
-    with st.container(border=True):
-        st.markdown(f"**{r['evidence_id']}** · {label} · run `{r.get('run_id')}` · incident `{r.get('incident_id')}`")
-        st.caption(r["evidence_source"])
-        st.download_button("Download this record (JSON)", json.dumps(r, indent=2, default=str),
-                           f"{r['evidence_id']}.json", "application/json", key="ev-one")
-        st.json(r, expanded=1)
+    d1, d2 = st.columns(2)
+    has = bool(bundle and bundle.get("records"))
+    d1.download_button("Export evidence (JSON)", json.dumps(bundle or {}, indent=2, default=str),
+                       f"adaptix-evidence-{env.lower().replace(' ', '-')}.json", "application/json",
+                       icon=":material/download:", disabled=not has)
+    d2.download_button("Export report (CSV)", csv_text if isinstance(csv_text, str) else "",
+                       f"adaptix-evidence-{env.lower().replace(' ', '-')}.csv", "text/csv", icon=":material/table:",
+                       disabled=not has)

@@ -1,3 +1,4 @@
+"""Simulation evaluation: baseline (repair off) vs ADAPTIX on deterministic simulated suites."""
 import pandas as pd
 import streamlit as st
 
@@ -19,7 +20,8 @@ ROWS = [("Accuracy (outcome as expected)", "accuracy", fmt_pct),
         ("LLM tokens", "tokens", str)]
 
 
-def _evaluation():
+def evaluation():
+    st.markdown(f"{SIM_BADGE} &nbsp; Baseline (repair off) vs ADAPTIX on simulated suites", unsafe_allow_html=True)
     st.markdown("Runs every case twice against simulated upstreams: once as a **baseline** (no repair: the call "
                 "simply fails) and once with **ADAPTIX**. Expected outcomes are fixed before the run.")
     c1, c2, c4, c3 = st.columns([1.4, .6, 1.4, 1])
@@ -69,67 +71,3 @@ def _evaluation():
                            "text/csv", icon=":material/download:")
 
 
-def _audit(prefix: str):
-    c1, c2 = st.columns(2)
-    kind = c1.text_input("Event kind", placeholder="schema_check", key=f"kind{prefix}")
-    tool = c2.text_input("Tool", key=f"tool{prefix}")
-    params = {"limit": 500}
-    if kind:
-        params["kind"] = kind
-    if tool:
-        params["tool"] = tool
-    ev = safe_call(api, "GET", f"{prefix}/audit", params=params)
-    if ev is None:
-        return
-    if not ev:
-        st.info("No audit events match.")
-        return
-    st.caption(f"{len(ev)} events, newest first. Payloads are redacted before they are stored.")
-    st.dataframe([{"time": e["ts"][:19], "event": e["kind"], "tool": e["tool"], "simulated": e["simulated"],
-                   "correlation": e["correlation_id"], "data": str(e["data"])[:160]} for e in ev],
-                 hide_index=True, use_container_width=True)
-    pick = st.selectbox("Inspect event", range(len(ev)), format_func=lambda i: f"{ev[i]['ts'][:19]} · {ev[i]['kind']}")
-    st.json(ev[pick]["data"])
-
-
-def _metrics(prefix: str):
-    m = safe_call(api, "GET", f"{prefix}/metrics")
-    if m is None:
-        return
-    s = m["sample"]
-    st.caption(f"Computed from {s['incidents']} stored incidents ({s['simulated_incidents']} simulated) and "
-               f"{s['executions']} executions.")
-    kpis([("Recovery success", fmt_pct(m["recovery_success_rate"]), "of all incidents"),
-          ("Zero-touch adaptation", fmt_pct(m["zero_touch_adaptation_rate"]), f"{m['schema_drift_incidents']} drift incidents"),
-          ("Mean retries", m["mean_retries"] if m["mean_retries"] is not None else "—", "per incident"),
-          ("Rollbacks", m["rollbacks"], f"success {fmt_pct(m['rollback_success_rate'])}")])
-    l = m["llm"]
-    st.markdown(f"**LLM usage** · {l['calls']} calls ({l['real_calls']} to a real provider, {l['ok']} returned a plan) · "
-                f"{l['prompt_tokens']} prompt / {l['output_tokens']} output tokens")
-    if l["error_categories"]:
-        st.caption("LLM errors: " + ", ".join(f"{k} ×{v}" for k, v in l["error_categories"].items()))
-    if m["per_tool"]:
-        st.dataframe(pd.DataFrame(m["per_tool"]).T.fillna(0).astype(int), use_container_width=True)
-
-
-def render(prefix: str = "/api"):
-    if prefix == "/api/sim":
-        header("Simulation Evaluation", "Baseline vs ADAPTIX on simulated suites",
-               "Deterministic suites against isolated simulated APIs, plus the simulation metrics and audit log. "
-               "Nothing here is production data.")
-        st.markdown(f"{SIM_BADGE} &nbsp; Simulation database only.", unsafe_allow_html=True)
-        t1, t2, t3 = st.tabs(["Evaluation", "Metrics", "Audit log"])
-        with t1:
-            _evaluation()
-        with t2:
-            _metrics(prefix)
-        with t3:
-            _audit(prefix)
-        return
-    header("Production Audit", "Evidence from real API traffic",
-           "Metrics computed from production records only (real providers), and the production audit log.")
-    t2, t3 = st.tabs(["Metrics", "Audit log"])
-    with t2:
-        _metrics(prefix)
-    with t3:
-        _audit(prefix)

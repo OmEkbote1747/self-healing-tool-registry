@@ -23,9 +23,9 @@ def render():
 
     ov = safe_call(api, "GET", "/api/overview") or {}
     st.subheader("Across environments (persisted records)")
-    cols = st.columns(4)
-    for col, (env, label) in zip(cols, (("LIVE_API", "REAL API"), ("LIVE_DB_DEMO", "LIVE DB DEMO"),
-                                        ("REAL_API_TEST", "REAL API TEST"), ("SIMULATION", "SIMULATION"))):
+    cols = st.columns(3)
+    for col, (env, label) in zip(cols, (("LIVE_API", "REAL API"), ("REAL_API_TEST", "REAL API TEST"),
+                                        ("SIMULATION", "SIMULATION"))):
         o = ov.get(env)
         if not o:
             continue
@@ -56,8 +56,8 @@ def render():
         ("Unreachable at last check", sum(c["connectivity"] == "unreachable" for c in checks), "connectivity"),
     ])
     if not tools:
-        empty("No real API is registered yet. Register one on the Real API Monitoring page.",
-              "Open Real API Monitoring", "monitoring")
+        empty("No real API is registered yet. Register one in API Registry, or try the Drift Demo.",
+              "Open API Registry", "monitoring")
     else:
         st.subheader("Real APIs")
         st.dataframe([{"tool": t["tool"], "provider": t["provider"], "endpoint": f"{t['method']} {t['endpoint']}",
@@ -78,7 +78,7 @@ def render():
                     st.markdown(f"{badge(i['status'])} &nbsp; **{i['tool']}** &nbsp; {REAL_BADGE}", unsafe_allow_html=True)
                     st.caption(f"{i['category'].replace('_', ' ')} · {fmt_ms(i['duration_ms'])} · {i['started_at'][:19]}Z")
                     if st.button("Open timeline", key=f"ov-{i['id']}", icon=":material/timeline:"):
-                        go("recovery", incident_id=i["id"])
+                        go("recovery", incident_id=i["id"], env_choice="REAL API")
     with st.container(border=True):
         st.markdown(f"{SIM_BADGE} &nbsp; **Simulation Lab** has {health['simulated_tools']} simulated tool(s) in its "
                     "own database. Simulated results never appear on this page.", unsafe_allow_html=True)

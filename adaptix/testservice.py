@@ -161,6 +161,11 @@ class TestService:
                                        **self._matrix_specs[name]})(scope, receive, send)
         return await JSONResponse({"detail": "unknown admin route"}, status_code=404)(scope, receive, send)
 
+    def clear_apps(self):
+        """Forget every scenario app (used by the demo reset)."""
+        self._matrix.clear()
+        self._matrix_specs.clear()
+
     def orders_state(self) -> dict:
         return {"version": self.store.version, "mode": self.store.mode, "orders_stored": len(self.store.orders),
                 "writes": self.store.writes, "calls": self.store.calls}

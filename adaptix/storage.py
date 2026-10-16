@@ -61,8 +61,7 @@ class IsolationError(RuntimeError):
     """An attempt to mix simulation and production records."""
 
 
-ENVIRONMENT = {"production": "LIVE_API", "real_api_test": "REAL_API_TEST", "simulation": "SIMULATION",
-               "live_db": "LIVE_DB_DEMO"}
+ENVIRONMENT = {"production": "LIVE_API", "real_api_test": "REAL_API_TEST", "simulation": "SIMULATION"}
 
 
 class Storage:
@@ -167,8 +166,7 @@ class Storage:
     def register(self, spec: ToolSpec, td: ToolDef, op: Operation):
         self._guard(spec.simulated, "tool")
         if spec.base_url.startswith("sim://") != self.simulated or \
-                (self.mode == "real_api_test" and not spec.base_url.startswith("http://127.0.0.1:")) or \
-                ((self.mode == "live_db") != spec.base_url.startswith("pg://")):
+                (self.mode == "real_api_test" and not spec.base_url.startswith("http://127.0.0.1:")):
             raise IsolationError(f"{spec.base_url} cannot be registered in the {self.mode} store")
         sig = self.save_schema(op)
         td.schema_signature = sig

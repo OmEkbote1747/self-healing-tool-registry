@@ -1,7 +1,7 @@
 """Simulation Lab: controlled, repeatable schema-drift scenarios against isolated simulated APIs."""
 import streamlit as st
 
-from views.common import SIM_BADGE, api, badge, fmt_ms, go, header, safe_call
+from views.common import SIM_BADGE, api, badge, fmt_ms, go, header, mutated, safe_call
 
 LLM_CHOICES = {"none": "Rules only (deterministic, no LLM)", "mock": "Mock LLM (deterministic, NOT a real model)",
                "gemini": "Real Gemini (real requests, labelled)"}
@@ -81,14 +81,13 @@ def _detail(r: dict, scenario: dict):
     with tabs[4]:
         for s in inc["timeline"]:
             st.markdown(f"`{s['stage']}` {s['title']}")
-        if st.button("Open in Simulation Records", key=f"open-{inc['id']}"):
-            go("sim_records", incident_id=inc["id"])
+        if st.button("Open in Recovery Center", key=f"open-{inc['id']}"):
+            go("recovery", incident_id=inc["id"], env_choice="SIMULATION")
 
 
 def _result(r: dict, scenario: dict):
     with st.container(border=True):
-        mode = "Baseline (no repair)" if r["mode"] == "baseline" else "ADAPTIX"
-        st.markdown(f"{SIM_BADGE} &nbsp; **{mode}** &nbsp; {badge(r['outcome'])} &nbsp; "
+        st.markdown(f"{SIM_BADGE} &nbsp; **ADAPTIX recovery** &nbsp; {badge(r['outcome'])} &nbsp; "
                     + ("✅ as expected" if r["matches_expectation"] else f"⚠️ expected {r['expected']}, got {r['outcome']}"),
                     unsafe_allow_html=True)
         st.caption(f"{(r.get('category') or 'ok').replace('_', ' ')} · {fmt_ms(r['duration_ms'])}"
@@ -104,6 +103,15 @@ def render():
     header("Simulation Lab", "Controlled, repeatable API failures",
            "Each scenario registers a simulated tool against v1 of an isolated in-process API, switches it to v2 "
            "and calls the tool. Simulation data lives in its own database and never reaches a real provider.")
+    tab_run, tab_eval = st.tabs(["Introduce a change", "Evaluation"])
+    with tab_eval:
+        from views.evaluation import evaluation
+        evaluation()
+    with tab_run:
+        _lab()
+
+
+def _lab():
     st.markdown(f"{SIM_BADGE} &nbsp; Everything on this page is simulated.", unsafe_allow_html=True)
     cat = safe_call(api, "GET", "/api/simulations")
     integ = safe_call(api, "GET", "/api/integrations")
@@ -111,13 +119,10 @@ def render():
         return
     gemini_ok = integ["gemini"]["credentials"]["status"] == "CONFIGURED"
     groups = list(dict.fromkeys(s["group"] for s in cat))
-    c1, c2, c3, c4 = st.columns([1, 2, 1.1, 1.6])
+    c1, c2, c4 = st.columns([1, 2.2, 1.6])
     group = c1.selectbox("Group", groups)
     items = [s for s in cat if s["group"] == group]
     s = c2.selectbox("Scenario", items, format_func=lambda s: s["title"])
-    mode = c3.selectbox("Run", ["both", "adaptix", "baseline"],
-                        format_func={"both": "Baseline vs ADAPTIX", "adaptix": "ADAPTIX only",
-                                     "baseline": "Baseline only"}.get)
     choices = [k for k in LLM_CHOICES if k != "gemini" or gemini_ok]
     llm = c4.selectbox("LLM planner", choices, format_func=LLM_CHOICES.get,
                        help="Real Gemini appears only when GEMINI_API_KEY is configured on the server")
@@ -135,14 +140,17 @@ def render():
     if extra:
         st.caption("Other simulated changes: " + ", ".join(f"{k}={v}" for k, v in extra.items()))
     st.caption(f"Caller arguments: {s['args']}")
+    confirm = st.checkbox("I confirm: introduce this simulated change (in-process only)", key="sim_confirm")
     b1, b2, b3 = st.columns(3)
-    if b1.button("Run scenario", type="primary", icon=":material/bolt:"):
-        with st.spinner("Running…"):
+    if b1.button("Introduce change", type="primary", icon=":material/bolt:", disabled=not confirm,
+                 help="Applies the v2 change to the simulated API, makes the call, and ADAPTIX recovers automatically"):
+        with st.spinner("Introducing the change and recovering…"):
             res = safe_call(api, "POST", "/api/simulations",
-                            json={"scenario": s["id"], "mode": mode, "llm": llm, "seed": int(seed)})
+                            json={"scenario": s["id"], "mode": "adaptix", "llm": llm, "seed": int(seed)})
         if res:
+            mutated()
             st.session_state["chaos_last"] = (s["id"], res["runs"])
-    if b2.button("Run all scenarios", icon=":material/playlist_play:"):
+    if b2.button("Run all scenarios", icon=":material/playlist_play:", disabled=not confirm):
         out, bar = [], st.progress(0.0)
         for i, sc in enumerate(cat):
             r = safe_call(api, "POST", "/api/simulations",
@@ -150,18 +158,17 @@ def render():
             if r:
                 out += r["runs"]
             bar.progress((i + 1) / len(cat))
+        mutated("chaos_all")
         st.session_state["chaos_all"] = out
-    if b3.button("Reset simulation data", icon=":material/restart_alt:"):
+    reset_ok = b3.checkbox("Confirm reset", key="sim_reset_ok")
+    if b3.button("Reset simulation data", icon=":material/restart_alt:", disabled=not reset_ok):
         if safe_call(api, "POST", "/api/simulations/reset"):
-            st.session_state.pop("chaos_last", None)
-            st.session_state.pop("chaos_all", None)
+            mutated()
             st.success("Simulation database cleared. Production data is in a different database and was not touched.")
     last = st.session_state.get("chaos_last")
     if last and last[0] == s["id"]:
-        cols = st.columns(len(last[1]))
-        for col, r in zip(cols, last[1]):
-            with col:
-                _result(r, s)
+        for r in last[1]:
+            _result(r, s)
     if st.session_state.get("chaos_all"):
         rows = st.session_state["chaos_all"]
         ok = sum(r["matches_expectation"] for r in rows)

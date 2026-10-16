@@ -54,7 +54,7 @@ def render():
     st.subheader("External APIs")
     _row("Approved hosts", ext["allowed_hosts"])
     if not ext["apis"]:
-        st.info("No real API is registered. Use Real API Monitoring to add one.", icon=":material/info:")
+        st.info("No real API is registered. Use API Registry to add one.", icon=":material/info:")
     for a in ext["apis"]:
         with st.container(border=True):
             st.markdown(f"**{a['provider']}** · `{a['tool']}` · `{a['endpoint']}`")
