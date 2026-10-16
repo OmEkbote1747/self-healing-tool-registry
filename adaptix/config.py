@@ -32,7 +32,8 @@ def _float(name, default):
 @dataclass(frozen=True)
 class Settings:
     app_env: str = "development"
-    db_path: str = "data/adaptix.db"
+    db_path: str = "data/adaptix.db"             # production (real APIs) records
+    sim_db_path: str = "data/adaptix-sim.db"     # Simulation Lab records: a separate database file
     # LLM
     llm_provider: str = "gemini"                 # gemini | mock | none
     gemini_model: str = "gemini-3.5-flash-lite"  # Google's recommended fast/cost-efficient model (docs, 2026-10)
@@ -53,6 +54,23 @@ class Settings:
     max_body_bytes: int = 256_000
     api_url: str | None = None                   # set to use a remote ADAPTIX API from the dashboard
     retention_days: int = 30
+    # real API egress (SSRF protection) and monitoring
+    allowed_hosts: tuple[str, ...] = ()          # exact hosts or "*.example.com"; empty = no real egress
+    allow_http: bool = False                     # plain http only if explicitly enabled
+    max_redirects: int = 3
+    max_schema_bytes: int = 5_000_000
+    host_min_interval_s: float = 1.0             # politeness: at most one request per host per interval
+    monitor_enabled: bool = True
+    monitor_interval_s: int = 3600               # default schema-check interval per real tool
+    monitor_min_interval_s: int = 300            # floor for any configured interval
+
+
+def _hosts(raw: str | None) -> tuple[str, ...]:
+    return tuple(h.strip().lower().rstrip(".") for h in (raw or "").split(",") if h.strip())
+
+
+def _bool(name, default: bool) -> bool:
+    return (env(name, "true" if default else "false") or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 @lru_cache
@@ -61,6 +79,7 @@ def get_settings() -> Settings:
     return Settings(
         app_env=env("APP_ENV", "development"),
         db_path=env("ADAPTIX_DB_PATH", "data/adaptix.db"),
+        sim_db_path=env("ADAPTIX_SIM_DB_PATH", "data/adaptix-sim.db"),
         llm_provider=(env("LLM_PROVIDER", "gemini") or "gemini").lower(),
         gemini_model=env("GEMINI_MODEL", "gemini-3.5-flash-lite"),
         llm_timeout_s=_float("LLM_TIMEOUT_SECONDS", 20.0),
@@ -78,4 +97,11 @@ def get_settings() -> Settings:
         max_body_bytes=_int("ADAPTIX_MAX_BODY_BYTES", 256_000),
         api_url=env("ADAPTIX_API_URL"),
         retention_days=_int("ADAPTIX_RETENTION_DAYS", 30),
+        allowed_hosts=_hosts(env("ADAPTIX_ALLOWED_HOSTS")),
+        allow_http=_bool("ADAPTIX_ALLOW_HTTP", False),
+        max_redirects=_int("ADAPTIX_MAX_REDIRECTS", 3),
+        max_schema_bytes=_int("ADAPTIX_MAX_SCHEMA_BYTES", 5_000_000),
+        host_min_interval_s=_float("ADAPTIX_HOST_MIN_INTERVAL_SECONDS", 1.0),
+        monitor_enabled=_bool("ADAPTIX_MONITOR_ENABLED", True),
+        monitor_interval_s=max(_int("ADAPTIX_MONITOR_INTERVAL_SECONDS", 3600), 300),
     )

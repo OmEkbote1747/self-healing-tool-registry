@@ -80,11 +80,12 @@ def is_live(provider) -> bool:
     return bool(getattr(provider, "real", False)) and bool(getattr(provider, "configured", lambda: True)())
 
 
-def make_provider(settings, creds):
+def make_provider(settings, creds, mode: str = "production"):
+    """Production never gets the mock: LLM_PROVIDER=mock there means no LLM tier (ambiguous repairs stop)."""
     if settings.llm_provider == "gemini":
         from .gemini import GeminiProvider
         return GeminiProvider(creds, settings.gemini_model, settings.llm_timeout_s, settings.llm_max_retries)
-    if settings.llm_provider == "mock":
+    if settings.llm_provider == "mock" and mode == "simulation":
         from .mock import MockProvider
         return MockProvider()
     return NoProvider()

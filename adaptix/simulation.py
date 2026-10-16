@@ -1,4 +1,7 @@
-"""Chaos Lab: reproducible, SIMULATED schema-drift scenarios.
+"""Simulation Lab: reproducible, SIMULATED schema-drift scenarios.
+
+Runs only on a simulation-mode engine (separate database, sim:// upstreams only, its own credential
+registry with throwaway keys). A simulated mutation can therefore never reach a real provider.
 
 Each scenario installs a simulated API (sim://<name>), registers a tool against its v1 schema, applies a
 mutation (v2), then calls the tool - with self-healing (ADAPTIX) or without (baseline). Every incident it
@@ -66,6 +69,14 @@ SCENARIOS: list[Scenario] = [
     Scenario("nested-move", "Fields move into a nested object", "Request drift", "name and email move under customer.",
              {"name": "str", "email": "str"}, {"customer.name": "str", "customer.email": "str"},
              {"name": "Asha", "email": "asha@example.com"}, "recovered", "schema_drift"),
+    Scenario("removed-field", "Removed field the caller still sends", "Request drift",
+             "The API drops the optional 'nickname' field and silently ignores it, answering 200. The caller "
+             "asked to set it, so the task was not done: verification must catch this and stop.",
+             {**U, "nickname": "str?"}, U, {**UA, "nickname": "Ash"}, "stopped", "verification_failed"),
+    Scenario("nested-response-move", "Response output moved into a nested object", "Response drift",
+             "The API moves its 'status' output under 'result' (result.status). The call itself still works.",
+             U, U, UA, "recovered", "schema_drift",
+             v2_response={"status_field": "result.status", "status_value": "updated", "echo_field": "received"}),
     Scenario("response-rename", "Renamed response field", "Response drift",
              "The API renames its 'status' output to 'state' (documented). The call itself still works.",
              U, U, UA, "recovered", "schema_drift",
@@ -141,8 +152,18 @@ def install(engine, s: Scenario, run_id: str, mode: str) -> str:
     return name
 
 
+class SimulationError(RuntimeError):
+    pass
+
+
+def require_simulation(engine):
+    if getattr(engine, "mode", None) != "simulation":
+        raise SimulationError("simulations run only on the simulation engine, never against production")
+
+
 def run(engine, scenario_id: str, seed: int = 7, heal: bool = True) -> dict:
     """Run one scenario. Deterministic for a given seed (ids are derived from it)."""
+    require_simulation(engine)
     s = BY_ID[scenario_id]
     rnd = random.Random(f"{scenario_id}:{seed}:{heal}")
     run_id = f"{seed}-{rnd.randrange(16 ** 6):06x}"
@@ -151,7 +172,7 @@ def run(engine, scenario_id: str, seed: int = 7, heal: bool = True) -> dict:
         return _run_auth(engine, s, run_id, mode, heal)
     name = install(engine, s, run_id, mode)
     res = engine.execute(name, dict(s.args), scenario=s.id, heal=heal)
-    return _summarize(s, mode, res, engine.upstreams.sim_app(name), expected_outcome(s, engine, heal))
+    return _summarize(s, mode, res, engine.upstreams.sim_app(name), expected_outcome(s, engine, heal), engine)
 
 
 def _run_auth(engine, s: Scenario, run_id: str, mode: str, heal: bool) -> dict:
@@ -178,7 +199,7 @@ def _run_auth(engine, s: Scenario, run_id: str, mode: str, heal: bool) -> dict:
     for c in engine.creds._creds:
         if c.group == group:
             c.failover_on = ["rate_limited", "credential_expired"]
-    return _summarize(s, mode, res, engine.upstreams.sim_app(name), expected_outcome(s, engine, heal))
+    return _summarize(s, mode, res, engine.upstreams.sim_app(name), expected_outcome(s, engine, heal), engine)
 
 
 def expected_outcome(s: Scenario, engine, heal: bool = True) -> str:
@@ -190,9 +211,24 @@ def expected_outcome(s: Scenario, engine, heal: bool = True) -> str:
     return s.expect
 
 
-def _summarize(s: Scenario, mode: str, res: dict, app, expected: str) -> dict:
+def llm_label(llm_meta: dict | None) -> dict:
+    """How the LLM was involved in a run, labelled so mock output is never mistaken for real inference."""
+    if not llm_meta:
+        return {"used": False, "label": "not used"}
+    real = bool(llm_meta.get("real"))
+    kind = "REAL Gemini request" if real and llm_meta.get("provider") == "gemini" else \
+        ("real provider request" if real else "MOCK (not a real model)" if "mock" in str(llm_meta.get("provider"))
+         else "no request sent")
+    return {"used": True, "label": kind, "real": real, "provider": llm_meta.get("provider"),
+            "model": llm_meta.get("model"), "ok": llm_meta.get("ok"), "error_category": llm_meta.get("error_category"),
+            "prompt_tokens": llm_meta.get("prompt_tokens"), "output_tokens": llm_meta.get("output_tokens")}
+
+
+def _summarize(s: Scenario, mode: str, res: dict, app, expected: str, engine=None) -> dict:
     outcome = "recovered" if res["status"] in ("ok", "recovered") else res["status"]
+    inc = engine.storage.incident(res["incident"]) if engine is not None and res.get("incident") else None
     return {"scenario": s.id, "title": s.title, "mode": mode, "simulated": True, "expected": expected,
+            "llm": llm_label(inc.llm if inc else None), "llm_planner": getattr(engine.llm, "name", "none") if engine else None,
             "outcome": outcome, "matches_expectation": outcome == expected, "category": res.get("category"),
             "incident": res.get("incident"), "reason": res.get("reason"), "duration_ms": res.get("duration_ms"),
             "tool_version": res.get("tool_version"), "upstream_calls": getattr(app.state, "calls", None),

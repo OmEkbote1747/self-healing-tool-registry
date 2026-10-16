@@ -1,4 +1,10 @@
-"""Durable state: registry, schema history, incidents, audit events, executions, mapping cache, locks.
+"""Durable state: registry, schema history, incidents, audit events, executions, mapping cache, locks,
+schema-monitoring checks.
+
+Production (real APIs) and simulation records live in SEPARATE database files. Each file records its mode
+on creation, and every write is checked against it: a production store refuses simulated tools, incidents,
+events and executions, and a simulation store refuses real ones (IsolationError). This is enforced here, in
+the backend, so no UI or API path can mix the two.
 
 SQLite in WAL mode with IMMEDIATE transactions: one writer at a time across threads and processes on a
 host. Versions are never deleted (superseded / rolled_back), so every change is reversible and auditable.
@@ -36,6 +42,10 @@ CREATE TABLE IF NOT EXISTS executions (id INTEGER PRIMARY KEY AUTOINCREMENT, ts 
 CREATE TABLE IF NOT EXISTS mappings (tool TEXT, from_sig TEXT, to_sig TEXT, plan TEXT, created_at TEXT,
   uses INTEGER DEFAULT 0, PRIMARY KEY (tool, from_sig, to_sig));
 CREATE TABLE IF NOT EXISTS locks (tool TEXT PRIMARY KEY, holder TEXT, expires_at REAL);
+CREATE TABLE IF NOT EXISTS checks (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, tool TEXT NOT NULL,
+  trigger TEXT, schema_status TEXT, connectivity TEXT, error_category TEXT, drift INTEGER, data TEXT);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE INDEX IF NOT EXISTS ix_checks ON checks (tool, id);
 CREATE INDEX IF NOT EXISTS ix_inc_tool ON incidents (tool, started_at);
 CREATE INDEX IF NOT EXISTS ix_events ON events (tool, ts);
 """
@@ -45,13 +55,35 @@ class ConflictError(RuntimeError):
     """The tool changed since the repair was planned."""
 
 
+class IsolationError(RuntimeError):
+    """An attempt to mix simulation and production records."""
+
+
 class Storage:
-    def __init__(self, path: str | Path):
-        self.path = str(path)
+    def __init__(self, path: str | Path, mode: str = "production"):
+        if mode not in ("production", "simulation"):
+            raise ValueError(f"unknown storage mode {mode}")
+        self.path, self.mode = str(path), mode
+        self.simulated = mode == "simulation"
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as c:
             c.executescript(DDL)
+        with self._tx() as c:
+            r = c.execute("SELECT value FROM meta WHERE key='mode'").fetchone()
+            if r is None:
+                c.execute("INSERT INTO meta VALUES ('mode', ?)", (mode,))
+            elif r["value"] != mode:
+                raise IsolationError(f"{self.path} is a {r['value']} database; refusing to open it as {mode}")
+
+    def _guard(self, simulated: bool | None, what: str) -> bool:
+        """Returns the record's simulated flag, refusing records from the other mode."""
+        if simulated is None:
+            return self.simulated
+        if bool(simulated) != self.simulated:
+            raise IsolationError(f"refusing to write a {'simulated' if simulated else 'real'} {what} "
+                                 f"into the {self.mode} store")
+        return bool(simulated)
 
     @contextmanager
     def _conn(self):
@@ -76,7 +108,8 @@ class Storage:
 
     # ---------------------------------------------------------------- audit
     def event(self, kind: str, tool: str | None = None, data: dict | None = None, correlation_id: str | None = None,
-              simulated: bool = False, conn=None):
+              simulated: bool | None = None, conn=None):
+        simulated = self._guard(simulated, "audit event")
         row = (now_iso(), correlation_id, tool, kind, int(simulated), json.dumps(redact(data or {}), default=str))
         sql = "INSERT INTO events (ts, correlation_id, tool, kind, simulated, data) VALUES (?,?,?,?,?,?)"
         if conn is not None:
@@ -116,6 +149,9 @@ class Storage:
 
     # ---------------------------------------------------------------- tools and versions
     def register(self, spec: ToolSpec, td: ToolDef, op: Operation):
+        self._guard(spec.simulated, "tool")
+        if spec.base_url.startswith("sim://") != self.simulated:
+            raise IsolationError(f"{spec.base_url} cannot be registered in the {self.mode} store")
         sig = self.save_schema(op)
         td.schema_signature = sig
         with self._tx() as c:
@@ -130,7 +166,7 @@ class Storage:
 
     def delete_tool(self, name: str):
         with self._tx() as c:
-            for t in ("tools", "versions", "mappings", "locks"):
+            for t in ("tools", "versions", "mappings", "locks", "checks"):
                 c.execute(f"DELETE FROM {t} WHERE {'name' if t == 'tools' else 'tool'}=?", (name,))
             self.event("tool_deleted", name, conn=c)
 
@@ -172,8 +208,9 @@ class Storage:
             return [self._row_def(r) for r in c.execute("SELECT * FROM versions WHERE tool=? ORDER BY version", (tool,))]
 
     def apply_repair(self, td: ToolDef, expected_version: int, origin: str, incident_id: str | None,
-                     correlation_id: str | None = None, simulated: bool = False) -> ToolDef:
+                     correlation_id: str | None = None, simulated: bool | None = None) -> ToolDef:
         """Atomically make `td` the active version, but only if the active version is still `expected_version`."""
+        simulated = self._guard(simulated, "registry update")
         with self._tx() as c:
             cur = self.current(td.name, conn=c)
             if cur is None or cur.version != expected_version:
@@ -188,8 +225,9 @@ class Storage:
         return td
 
     def rollback(self, tool: str, version: int, reason: str, correlation_id: str | None = None,
-                 simulated: bool = False) -> ToolDef | None:
+                 simulated: bool | None = None) -> ToolDef | None:
         """Mark `version` rolled back and reactivate its parent. Returns the restored version."""
+        simulated = self._guard(simulated, "rollback")
         with self._tx() as c:
             r = c.execute("SELECT * FROM versions WHERE tool=? AND version=?", (tool, version)).fetchone()
             if r is None or r["status"] != "active" or r["parent_version"] is None:
@@ -232,6 +270,7 @@ class Storage:
 
     # ---------------------------------------------------------------- incidents and executions
     def save_incident(self, inc: Incident):
+        self._guard(inc.simulated, "incident")
         data = json.dumps(redact(inc.model_dump(mode="json")), default=str)
         with self._tx() as c:
             c.execute("INSERT OR REPLACE INTO incidents VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -263,6 +302,7 @@ class Storage:
 
     def record_execution(self, tool: str, ok: bool, category: str, duration_ms: float, simulated: bool,
                          incident_id: str | None = None):
+        self._guard(simulated, "execution")
         with self._tx() as c:
             c.execute("INSERT INTO executions (ts, tool, ok, category, duration_ms, simulated, incident_id) "
                       "VALUES (?,?,?,?,?,?,?)", (now_iso(), tool, int(ok), category, duration_ms, int(simulated), incident_id))
@@ -285,10 +325,13 @@ class Storage:
             n = c.execute("DELETE FROM events WHERE ts < ?", (cutoff,)).rowcount
             n += c.execute("DELETE FROM incidents WHERE started_at < ?", (cutoff,)).rowcount
             n += c.execute("DELETE FROM executions WHERE ts < ?", (cutoff,)).rowcount
+            n += c.execute("DELETE FROM checks WHERE ts < ?", (cutoff,)).rowcount
         return n
 
     def reset(self, simulated_only: bool = True):
-        """Remove simulated data (the Chaos Lab's 'reset' action)."""
+        """Remove simulated data (the Simulation Lab's 'reset' action). Refused on the production store."""
+        if not self.simulated:
+            raise IsolationError("reset is only available on the simulation store")
         with self._tx() as c:
             names = [json.loads(r["spec"])["name"] for r in c.execute("SELECT spec FROM tools")
                      if json.loads(r["spec"]).get("simulated") or not simulated_only]
@@ -301,6 +344,32 @@ class Storage:
             c.execute("DELETE FROM events" + w)
             c.execute("DELETE FROM executions" + w)
             self.event("reset", None, {"simulated_only": simulated_only, "tools": names}, conn=c)
+
+
+    # ---------------------------------------------------------------- schema monitoring checks
+    def save_check(self, check: dict):
+        with self._tx() as c:
+            c.execute("INSERT INTO checks (ts, tool, trigger, schema_status, connectivity, error_category, drift, data) "
+                      "VALUES (?,?,?,?,?,?,?,?)", (check["ts"], check["tool"], check["trigger"], check["schema_status"],
+                                                   check["connectivity"], check.get("error_category"),
+                                                   int(bool(check.get("drift"))), json.dumps(redact(check), default=str)))
+
+    def checks(self, tool: str | None = None, limit: int = 50) -> list[dict]:
+        q, a = "SELECT data FROM checks", []
+        if tool:
+            q += " WHERE tool=?"
+            a.append(tool)
+        q += " ORDER BY id DESC LIMIT ?"
+        a.append(min(limit, 1000))
+        with self._conn() as c:
+            return [json.loads(r["data"]) for r in c.execute(q, a)]
+
+    def update_spec(self, spec: ToolSpec):
+        self._guard(spec.simulated, "tool")
+        with self._tx() as c:
+            c.execute("UPDATE tools SET spec=? WHERE name=?", (spec.model_dump_json(), spec.name))
+            self.event("tool_settings_updated", spec.name, {"monitor_enabled": spec.monitor_enabled,
+                                                            "monitor_interval_s": spec.monitor_interval_s}, conn=c)
 
 
 def new_holder() -> str:

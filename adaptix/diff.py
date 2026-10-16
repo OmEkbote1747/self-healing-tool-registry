@@ -96,3 +96,39 @@ def diff(old: Operation, new: Operation | str | None) -> DriftReport:
     return DriftReport(old_signature=old.signature(), new_signature=new.signature(),
                        changed=old.signature() != new.signature(), content_type_changed=ct, request_changes=req,
                        response_changes=resp, compatibility=compat, summary=summary)
+
+
+def sent_locations(req: dict) -> set[str]:
+    """Location keys ("body:a.b", "query:x", "path:id") of the request that was actually built."""
+    out: set[str] = set()
+
+    def walk(d, prefix):
+        for k, v in d.items():
+            if isinstance(v, dict) and v:
+                walk(v, f"{prefix}{k}.")
+            else:
+                out.add(f"body:{prefix}{k}")
+    if isinstance(req.get("body"), dict):
+        walk(req["body"], "")
+    out |= {f"query:{k}" for k in (req.get("query") or {})}
+    out |= {f"path:{k}" for k in (req.get("path_params") or {})}
+    return out
+
+
+def request_conflicts(report: DriftReport, sent: set[str], sent_headers: set[str]) -> list[str]:
+    """How the request actually sent violates the NEW schema on locations the drift touched (evidence)."""
+    out = []
+    for c in report.request_changes:
+        if c.kind == "removed" and c.location in sent:
+            out.append(f"sent {c.location}, which the schema no longer accepts")
+        elif c.kind in ("renamed", "moved") and c.old in sent:
+            out.append(f"sent {c.old}, now {c.location}")
+        elif c.kind == "added" and c.detail == "required" and c.location not in sent:
+            out.append(f"did not send newly required {c.location}")
+        elif c.kind == "type_changed" and c.location in sent:
+            out.append(f"{c.location} must now be {c.new}")
+        elif c.kind == "required_changed" and c.new == "True" and c.location not in sent:
+            out.append(f"{c.location} is now required")
+        elif c.kind == "header_added" and c.location.split(":", 1)[1] not in sent_headers:
+            out.append(f"did not send newly required {c.location}")
+    return out

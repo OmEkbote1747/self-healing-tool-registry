@@ -106,6 +106,12 @@ def validate(plan: RepairPlan, td: ToolDef, spec: ToolSpec, new: Operation, args
 
     missing = [loc for loc, f in new.fields.items() if f.required and loc not in request_map]
     _check(res, "every required field mapped", not missing, ", ".join(missing))
+    # a value the caller supplied and the old version sent must not silently disappear: if the API removed
+    # that field, the caller's intent can no longer be fulfilled as asked
+    sent_before = {s for s, _ in td.request_map.values() if s in args and args[s] is not None}
+    dropped = sorted(sent_before - used)
+    _check(res, "no caller-supplied value silently dropped", not dropped,
+           ", ".join(dropped) + (" would be discarded" if dropped else ""))
 
     header_map = {}
     scope = f"tool:{spec.name}"

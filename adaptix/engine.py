@@ -29,16 +29,17 @@ import httpx
 from .classify import EXPLAIN, Classification, classify_exception, classify_response
 from .config import Settings
 from .credentials import CredentialError, CredentialRegistry
-from .diff import DriftReport, diff
+from .diff import DriftReport, diff, request_conflicts, sent_locations
 from .models import Incident, LLMRepairPlan, Mapping, RepairPlan, ToolSpec, now_iso
 from .planner import leaf, plan_request, plan_response
 from .schema import Operation, parse_json_schema, parse_openapi
 from .security import redact, redact_headers, redact_reply, scrub
 from .storage import ConflictError, Storage, new_holder
 from .tooldef import ToolDef, py_type
+from .netguard import EgressDenied
 from .upstreams import Upstreams
 from .validator import validate, validate_response
-from .verify import verify
+from .verify import verify as _verify
 
 CREDENTIAL_CATEGORIES = {"credential_expired", "credential_revoked", "credential_invalid", "rate_limited",
                          "authorization_failed", "authentication_missing"}
@@ -46,6 +47,17 @@ CREDENTIAL_CATEGORIES = {"credential_expired", "credential_revoked", "credential
 
 class EngineError(RuntimeError):
     pass
+
+
+@dataclass
+class Discovery:
+    """Result of authoritative schema discovery, with a sanitized error category when it fails."""
+    op: Operation | str | None = None
+    status: str = "failed"              # verified | failed | unsupported
+    error_category: str | None = None   # egress_denied:<why> | dns_failure | tls_error | timeout | network |
+    #                                     http_<code> | not_json | operation_not_in_schema | no_schema_source
+    detail: str = ""
+    url: str = ""
 
 
 @dataclass
@@ -69,32 +81,83 @@ class Engine:
     def __init__(self, storage: Storage, creds: CredentialRegistry, llm, settings: Settings,
                  upstreams: Upstreams | None = None, sleep=time.sleep):
         self.storage, self.creds, self.llm, self.s = storage, creds, llm, settings
-        self.upstreams = upstreams or Upstreams(settings.request_timeout_s)
+        self.mode = storage.mode
+        self.upstreams = upstreams or Upstreams(settings.request_timeout_s, mode=self.mode)
+        if self.upstreams.mode != self.mode:
+            raise EngineError(f"{self.mode} storage cannot be paired with {self.upstreams.mode} upstreams")
+        if self.mode == "production" and getattr(llm, "name", "").startswith("mock"):
+            raise EngineError("the production pipeline never uses the mock LLM")
         self.sleep = sleep
 
+    def set_llm(self, llm):
+        if self.mode == "production" and getattr(llm, "name", "").startswith("mock"):
+            raise EngineError("the production pipeline never uses the mock LLM")
+        self.llm = llm
+
     # ================================================================ schema discovery (C)
-    def discover(self, spec: ToolSpec) -> Operation | str | None:
+    def discover_detailed(self, spec: ToolSpec) -> Discovery:
+        if spec.schema_source.kind == "none":
+            return Discovery(status="unsupported", error_category="no_schema_source",
+                             detail="the provider publishes no machine-readable schema")
         url = spec.schema_url()
         try:
-            if url.startswith(spec.base_url.rstrip("/")):
-                r = self.upstreams.get(spec.base_url, url[len(spec.base_url.rstrip("/")):] or "/")
-            else:
-                r = httpx.get(url, timeout=self.s.request_timeout_s, follow_redirects=False)
-            if r.status_code != 200:
-                return None
-            doc = r.json()
-        except Exception:
-            return None
+            r = self.upstreams.fetch_json(url)
+        except EgressDenied as e:
+            return Discovery(error_category=f"egress_denied:{e.category}", detail=scrub(str(e))[:200], url=url)
+        except httpx.TimeoutException:
+            return Discovery(error_category="timeout", detail="the schema request timed out", url=url)
+        except httpx.ConnectError as e:
+            cat = "tls_error" if "CERTIFICATE" in str(e).upper() or "SSL" in str(e).upper() else "network"
+            return Discovery(error_category=cat, detail=scrub(str(e))[:200], url=url)
+        except (httpx.HTTPError, KeyError) as e:
+            return Discovery(error_category="network", detail=scrub(str(e))[:200], url=url)
+        if r.status != 200:
+            return Discovery(error_category=f"http_{r.status}", detail=f"the schema URL answered HTTP {r.status}", url=url)
+        if not isinstance(r.json, dict):
+            return Discovery(error_category="not_json", detail="the schema URL did not return a JSON object", url=url)
         if spec.schema_source.kind == "json_schema":
-            return parse_json_schema(doc, spec.path, spec.method)
-        return parse_openapi(doc, spec.path, spec.method)
+            op = parse_json_schema(r.json, spec.path, spec.method)
+        else:
+            op = parse_openapi(r.json, spec.path, spec.method)
+        if op is None:
+            return Discovery(error_category="operation_not_in_schema", url=url,
+                             detail=f"{spec.method} {spec.path} is not in the published schema")
+        return Discovery(op=op, status="verified", url=url)
+
+    def discover(self, spec: ToolSpec) -> Operation | str | None:
+        return self.discover_detailed(spec).op
+
+    def verify(self, spec: ToolSpec, td: ToolDef, body, request: dict):
+        op = self.storage.get_schema(td.schema_signature) if not td.response_map else None
+        return _verify(spec, td, body, request, op)
 
     # ================================================================ registration
+    def _declared_operation(self, spec: ToolSpec) -> Operation:
+        """Operator-declared fields for providers without a schema. NOT authoritative: never used as evidence."""
+        from .schema import FieldSpec
+        fields = {}
+        for loc, t in spec.schema_source.declared_fields.items():
+            if not loc.startswith(("body:", "query:", "path:")):
+                raise EngineError(f"declared field {loc!r} must start with body:, query: or path:")
+            fields[loc] = FieldSpec([t if t in ("str", "int", "float", "bool", "list", "object") else "str"], False)
+        return Operation(spec.method, spec.path, fields, [], None,
+                         ["application/json"] if any(k.startswith("body:") for k in fields) else [],
+                         source="declared")
+
     def register(self, spec: ToolSpec) -> ToolDef:
-        op = self.discover(spec)
-        if not isinstance(op, Operation):
-            raise EngineError(f"cannot register {spec.name}: no authoritative schema for {spec.method} {spec.path} "
-                              f"at {spec.schema_url()}")
+        if spec.simulated != (self.mode == "simulation"):
+            raise EngineError(f"a {'simulated' if spec.simulated else 'real'} tool cannot be registered in "
+                              f"{self.mode} mode")
+        if spec.schema_source.kind == "none":
+            if not spec.schema_source.declared_fields:
+                raise EngineError("a provider without a schema needs declared_fields (they are not authoritative)")
+            op = self._declared_operation(spec)
+        else:
+            d = self.discover_detailed(spec)
+            op = d.op
+            if not isinstance(op, Operation):
+                raise EngineError(f"cannot register {spec.name}: no authoritative schema for {spec.method} "
+                                  f"{spec.path} at {spec.schema_url()} ({d.error_category}: {d.detail})")
         request_map = {loc: [_arg_name(loc), "none"] for loc in op.fields}
         header_map = {}
         for h in op.headers:
@@ -157,8 +220,17 @@ class Engine:
             try:
                 r = self.upstreams.request(spec.base_url, req["method"], req["url"], params=req["query"] or None,
                                            json=req["body"], headers=headers, timeout=self.s.request_timeout_s)
+            except EgressDenied as e:                   # refused before sending anything
+                kind = "rate_limited" if e.category == "rate_limited_local" else \
+                    ("dns_failure" if e.category == "dns_failure" else "egress_denied")
+                out.first_failure = out.first_failure or kind
+                inc.add("request", f"{label}: not sent ({e.category})", "fail", {"error": scrub(str(e))[:200]})
+                out.error_kind, out.error = kind, scrub(str(e))[:200]
+                return out
             except (httpx.TimeoutException, httpx.TransportError, KeyError) as e:
                 kind = "timeout" if isinstance(e, httpx.TimeoutException) else "network"
+                if isinstance(e, httpx.ConnectError) and ("CERTIFICATE" in str(e).upper() or "SSL" in str(e).upper()):
+                    kind = "tls_error"
                 out.first_failure = out.first_failure or kind
                 inc.add("request", f"{label}: no answer ({kind})", "fail", {"error": scrub(str(e))[:200]})
                 if spec.is_idempotent() and out.retries < max_retries and self._wait(out, None, deadline, inc):
@@ -278,7 +350,7 @@ class Engine:
             inc.add("classify", c.explanation, "fail", {"category": c.category})
             return self._stop(inc, c.category, c.explanation)
         if sent.status < 400:
-            v = verify(spec, td, sent.body, sent.request)
+            v = self.verify(spec, td, sent.body, sent.request)
             if v.ok:
                 if sent.first_failure:                 # recovered by a bounded retry or credential failover
                     failover = any(s.stage == "credential" for s in inc.timeline)
@@ -303,7 +375,8 @@ class Engine:
             return self._stop(inc, "method_changed", EXPLAIN["method_changed"])
         report = diff(old, new) if (new is not None and old is not None) else None
         changed = None if report is None else report.changed
-        cls = classify_response(sent.status, sent.body, changed, report.touched() if report else None)
+        conflicts = request_conflicts(report, sent_locations(sent.request), set(td.header_map)) if report else []
+        cls = classify_response(sent.status, sent.body, changed, report.touched() if report else None, conflicts)
         inc.category = cls.category
         inc.add("classify", cls.explanation, "warn" if cls.category == "schema_drift" else "fail",
                 {"category": cls.category, "evidence": cls.evidence})
@@ -418,7 +491,7 @@ class Engine:
                 c = classify_exception(sent2.error_kind) if not sent2.error_kind.startswith("credential:") else None
                 return self._stop(inc, inc.category, (c.explanation if c else sent2.error), "rolled_back")
             if sent2.status < 400:
-                v = verify(spec, candidate, sent2.body, sent2.request)
+                v = self.verify(spec, candidate, sent2.body, sent2.request)
                 inc.verification = v.model_dump()
                 if v.ok:
                     inc.add("verify", "Original task verified: success status and the API applied the sent values",
@@ -481,7 +554,7 @@ class Engine:
             return self._stop(inc, "schema_drift", f"registry changed during repair ({e})")
         inc.to_version = cand.version
         inc.add("apply", f"Response mapping updated v{td.version} -> v{cand.version}", "ok", {"patch": cand.patch})
-        v = verify(spec, cand, sent.body, sent.request)        # same response: nothing is sent twice
+        v = self.verify(spec, cand, sent.body, sent.request)        # same response: nothing is sent twice
         inc.verification = v.model_dump()
         if v.ok:
             inc.status, inc.zero_touch, inc.result = "recovered", True, sent.body

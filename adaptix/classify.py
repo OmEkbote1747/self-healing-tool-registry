@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-RETRYABLE = {"rate_limited", "server_error", "timeout", "network"}
+RETRYABLE = {"rate_limited", "server_error", "timeout", "network", "dns_failure"}
 EXPLAIN = {
     "ok": "The call succeeded.",
     "schema_drift": "The API's request or response schema changed since this tool was registered.",
@@ -29,6 +29,11 @@ EXPLAIN = {
     "unsupported_change": "The API changed in a way ADAPTIX does not repair automatically (e.g. a non-JSON body).",
     "schema_unavailable": "The authoritative schema could not be fetched, so no repair is attempted (fail closed).",
     "credential_unavailable": "No authorized credential is configured or available for this call.",
+    "egress_denied": "The request was refused before sending: the destination is not an approved, public HTTPS "
+                     "host. Add the host to ADAPTIX_ALLOWED_HOSTS only if you are authorized to call it.",
+    "dns_failure": "The provider's host name could not be resolved.",
+    "tls_error": "The provider's TLS certificate could not be verified; nothing was sent.",
+    "rate_limited_local": "The provider asked us to wait (Retry-After); ADAPTIX is respecting that cooldown.",
     "unknown": "The failure does not match a known category.",
 }
 
@@ -46,12 +51,16 @@ def _c(category: str, *evidence: str) -> Classification:
 
 
 def classify_exception(kind: str) -> Classification:
-    return _c("timeout" if kind == "timeout" else "network", f"transport: {kind}")
+    cat = kind if kind in ("timeout", "network", "tls_error", "dns_failure", "egress_denied", "rate_limited") \
+        else "network"
+    return _c(cat, f"transport: {kind}")
 
 
 def classify_response(status: int, body, schema_changed: bool | None = None,
-                      touched: set[str] | None = None) -> Classification:
-    """`schema_changed`: None = authoritative schema unavailable; `touched`: locations changed by the drift."""
+                      touched: set[str] | None = None, conflicts: list[str] | None = None) -> Classification:
+    """`schema_changed`: None = authoritative schema unavailable; `touched`: locations changed by the drift;
+    `conflicts`: ways the request that was actually sent violates the new authoritative schema on changed
+    locations (independent evidence for providers whose error bodies do not name fields)."""
     detail = body.get("detail") if isinstance(body, dict) else None
     text = str(detail if detail is not None else body)[:300].lower()
     if status < 400:
@@ -79,6 +88,11 @@ def classify_response(status: int, body, schema_changed: bool | None = None,
     if status in (400, 409, 422):
         field_errors = detail if isinstance(detail, list) else []
         if not field_errors:
+            if schema_changed and conflicts:
+                return _c("schema_drift", "authoritative schema changed",
+                          "the request sent does not conform to the new schema: " + "; ".join(conflicts)[:200])
+            if schema_changed is None and status in (400, 422):
+                return _c("schema_unavailable", f"{status}, and the authoritative schema could not be read")
             return _c("business_rule", f"{status} with a non-field error: {text[:120]}")
         if schema_changed is None:
             return _c("schema_unavailable", "field errors, but the authoritative schema could not be read")

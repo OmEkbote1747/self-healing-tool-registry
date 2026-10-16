@@ -7,6 +7,7 @@ Field keys:   body "target.id" (dotted = nested), query "q:limit", path "p:user_
 Field specs:  "str" | "int" | "float" | "bool" | "date" | "list[str]" | "enum[a|b]"  (trailing "?" = optional)
               or {"type": "int", "description": "...", "renamed_from": "user_id"}  (documentation evidence)
 Response:     {"status_field": "status", "status_value": "updated", "echo_field": "received"}
+              (dotted fields such as "result.status" create nested response objects)
 Auth:         {"header": "x-api-key", "valid": [...], "expired": [...], "revoked": [...], "rate_limited": [...]}
 Faults:       {"status": 503} every call fails · {"delay": 1.0} slow answer after doing the work ·
               {"business_rule": "insufficient_balance"} rejects with a business error ·
@@ -87,9 +88,20 @@ def make_app(path: str, fields: dict, headers: list[str] | None = None, title: s
         old = resp_cfg.get(f"{key}_renamed_from")
         return Field(..., description=text + (f" (formerly {old})" if old else ""),
                      json_schema_extra={"x-renamed-from": old} if old else None)
-    response_model = create_model("Response_" + base, **{
-        resp_cfg["status_field"]: (str, _doc("status", "Outcome of the operation")),
-        resp_cfg["echo_field"]: (dict, _doc("echo", "The data the API applied"))})
+    def _resp_model(name, items):
+        flat, nested = {}, {}
+        for path, (key, typ, text) in items.items():
+            head, _, rest = path.partition(".")
+            if rest:
+                nested.setdefault(head, {})[rest] = (key, typ, text)
+            else:
+                flat[head] = (typ, _doc(key, text))
+        for head, sub in nested.items():
+            flat[head] = (_resp_model(f"{name}_{head.title()}", sub), ...)
+        return create_model(name, **flat)
+    response_model = _resp_model("Response_" + base, {
+        resp_cfg["status_field"]: ("status", str, "Outcome of the operation"),
+        resp_cfg["echo_field"]: ("echo", dict, "The data the API applied")})
 
     app = FastAPI(title=title + " (simulated)")
     app.state.effects = 0                 # how many times the side effect really happened
@@ -174,8 +186,14 @@ def make_app(path: str, fields: dict, headers: list[str] | None = None, title: s
         echo = received.get("body", {}) if body_model is not None else {k: v for k, v in received.items()}
         if body_model is not None and set(received) - {"body"}:
             echo = {**echo, **{f"_{k}": v for k, v in received.items() if k != "body"}}
-        result = {resp_cfg["status_field"]: faults.get("status_value", resp_cfg["status_value"]),
-                  resp_cfg["echo_field"]: echo}
+        result: dict = {}
+        for path, value in ((resp_cfg["status_field"], faults.get("status_value", resp_cfg["status_value"])),
+                            (resp_cfg["echo_field"], echo)):
+            node = result
+            *heads, last = path.split(".")
+            for h in heads:
+                node = node.setdefault(h, {})
+            node[last] = value
         if ikey:
             app.state.idempotency[ikey] = result
         if faults.get("delay"):

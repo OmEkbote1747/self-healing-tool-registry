@@ -10,6 +10,8 @@ PAGES = ["overview", "tools", "drift", "recovery", "audit", "chaos", "health"]
 @pytest.fixture(autouse=True)
 def _isolated_db(tmp_path, monkeypatch):
     monkeypatch.setenv("ADAPTIX_DB_PATH", str(tmp_path / "ui.db"))
+    monkeypatch.setenv("ADAPTIX_SIM_DB_PATH", str(tmp_path / "ui-sim.db"))
+    monkeypatch.setenv("ADAPTIX_MONITOR_ENABLED", "false")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     from adaptix.config import get_settings
     get_settings.cache_clear()
