@@ -37,14 +37,13 @@ def available() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
 
 
-def propose_mapping(tool: str, unfilled: dict[str, str], orphans: dict[str, str],
-                    errors: list[dict]) -> tuple[dict[str, str | None], int, str]:
-    """Return ({new_field_path: source_arg_or_None}, tokens_used, note)."""
-    import anthropic
-
-    prompt = (
+def build_prompt(tool: str, unfilled: dict[str, str], orphans: dict[str, str], errors: list[dict]) -> str:
+    """Only field names, types and error locations go to the model - never values or headers."""
+    safe_errors = [{"type": e.get("type"), "loc": e.get("loc"), "msg": e.get("msg")} for e in errors
+                   if not (e.get("loc") or [""])[0] == "header"]
+    return (
         f"An API used by the tool '{tool}' changed its request schema and rejected our call.\n"
-        f"Validation errors from the API:\n{json.dumps(errors, indent=1)}\n\n"
+        f"Validation errors from the API (values removed):\n{json.dumps(safe_errors, indent=1)}\n\n"
         f"New required fields with no value yet (path: type):\n{json.dumps(unfilled, indent=1)}\n\n"
         f"Arguments the agent already holds that no longer match any field (name: type):\n"
         f"{json.dumps(orphans, indent=1)}\n\n"
@@ -52,6 +51,14 @@ def propose_mapping(tool: str, unfilled: dict[str, str], orphans: dict[str, str]
         "clearly does. Never invent values and never reuse one argument for two fields. "
         "If two arguments are equally plausible for a field, answer null for it."
     )
+
+
+def propose_mapping(tool: str, unfilled: dict[str, str], orphans: dict[str, str],
+                    errors: list[dict]) -> tuple[dict[str, str | None], int, str]:
+    """Return ({new_field_path: source_arg_or_None}, tokens_used, note)."""
+    import anthropic
+
+    prompt = build_prompt(tool, unfilled, orphans, errors)
     client = anthropic.Anthropic()
     try:
         resp = client.beta.messages.create(

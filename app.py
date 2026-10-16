@@ -4,11 +4,22 @@ import streamlit as st
 from selfheal import llm
 from selfheal.cases import APPROVED_CONFIG
 from views import benchmark, demo, home, how, registry, stress
-from views.common import REPO_URL, ROOT, inject_css
+from selfheal.security import purge_audit_log
+from views.common import LOG, REPO_URL, ROOT, inject_css
+import os
 
 st.set_page_config(page_title="SchemaHeal · Self-Healing Tool Registry", page_icon=":material/healing:",
                    layout="wide", initial_sidebar_state="expanded")
 inject_css()
+
+
+@st.cache_resource
+def _apply_retention():
+    """Once per server process: drop audit entries past the retention window."""
+    return purge_audit_log(LOG, int(os.environ.get("SCHEMAHEAL_RETENTION_DAYS", "30")))
+
+
+_apply_retention()
 st.logo(str(ROOT / "assets" / "logo.svg"), size="large", link=REPO_URL)
 
 pages = {
@@ -37,6 +48,11 @@ with st.sidebar:
         st.markdown("- Never invent a value\n- Validate before retry\n- Max 2 repair attempts\n"
                     "- Headers only from approved config")
         st.caption("Approved config keys: " + ", ".join(APPROVED_CONFIG))
+    with st.expander("Data handling", icon=":material/lock:"):
+        st.markdown("- Header values are never shown or logged\n- Sensitive fields are masked\n"
+                    "- Values echoed in API errors are masked\n- The LLM sees field names and types only\n"
+                    "- Secrets come from the environment, not code\n- Audit log kept "
+                    f"{os.environ.get('SCHEMAHEAL_RETENTION_DAYS', '30')} days")
     st.caption("PS-01 · Team Runtime Terrors · Genesis 2.0")
 
 nav.run()

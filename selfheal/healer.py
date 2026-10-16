@@ -27,6 +27,7 @@ from rapidfuzz import fuzz
 
 from . import llm
 from .policy import PolicySet
+from .security import redact, redact_headers, redact_reply
 
 MAX_PATCH_ATTEMPTS = 2
 ELIMINATION_MIN = 50   # below this, a lone candidate is not trusted
@@ -331,7 +332,8 @@ class SelfHealer:
         out.sent.append({"body": body, "headers": headers, "status": r.status_code})
         payload = r.json()
         out.trace.append({"step": f"Request: {label}", "ok": r.status_code < 400,
-                          "detail": {"sent": body, "headers": headers, "status": r.status_code, "reply": payload}})
+                          "detail": {"sent": redact(body), "headers": redact_headers(headers),
+                                     "status": r.status_code, "reply": redact_reply(payload)}})
         return r.status_code, payload
 
     def _stop(self, out: Outcome, reason: str):
@@ -361,7 +363,8 @@ class SelfHealer:
                     if py_type(convert(args[s], c) if c else args[s]) != leaves[t]] +
                    [f"new required header: {h}" for h in missing_headers])
         out.trace.append({"step": "Detected schema change", "ok": True,
-                          "detail": {"source": source, "errors": errors, "changes": changes}})
+                          "detail": {"source": source, "errors": redact_reply({"detail": errors})["detail"],
+                                     "changes": changes}})
 
         new_map: dict[str, tuple[str, str | None]] = {}
         for t, (s, _) in kept.items():
@@ -409,9 +412,8 @@ class SelfHealer:
             if self.use_llm:
                 tier = "Tier 1 + Tier 2 (LLM)"
                 cand = {s: py_type(args[s]) for s in orphans if s not in used}
-                safe_errors = [{"type": e.get("type"), "loc": e.get("loc"), "msg": e.get("msg")} for e in errors]
                 proposal, tok, note = llm.propose_mapping(td.name, {p: leaves[p] for p in unresolved}, cand,
-                                                          safe_errors)
+                                                          errors)
                 out.tokens += tok
                 out.trace.append({"step": "LLM proposed a repair", "ok": bool(proposal),
                                   "detail": {"proposal": proposal, "note": note, "tokens": tok}})
@@ -534,7 +536,7 @@ class NaiveRetryAgent:
             out.calls += 1
             out.sent.append({"body": body, "headers": {}, "status": r.status_code})
             out.trace.append({"step": f"Attempt {i + 1}", "ok": r.status_code < 400,
-                              "detail": {"sent": body, "status": r.status_code, "reply": r.json()}})
+                              "detail": {"sent": redact(body), "status": r.status_code, "reply": redact_reply(r.json())}})
             if r.status_code < 400:
                 out.success, out.status, out.response = True, r.status_code, r.json()
                 return out
