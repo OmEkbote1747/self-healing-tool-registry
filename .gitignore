@@ -3,3 +3,11 @@ logs/
 __pycache__/
 *.pyc
 .streamlit/secrets.toml
+.pytest_cache/
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+!.env.example

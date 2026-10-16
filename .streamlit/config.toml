@@ -1,23 +1,24 @@
 [theme]
 base = "light"
-primaryColor = "#1565C0"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#EEF5FD"
-textColor = "#0F1E33"
-linkColor = "#1565C0"
-borderColor = "#D6E4F5"
+primaryColor = "#1D4ED8"
+backgroundColor = "#F5F7FB"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#0F172A"
+linkColor = "#1D4ED8"
+borderColor = "#DCE3EE"
 showWidgetBorder = true
-baseFontSize = 17
-baseRadius = "0.7rem"
-buttonRadius = "0.6rem"
-headingFontWeights = [800, 700, 700, 600, 600, 600]
-codeFontSize = "0.9rem"
-dataframeHeaderBackgroundColor = "#EAF2FC"
+baseFontSize = 16
+baseRadius = "0.6rem"
+buttonRadius = "0.5rem"
+headingFontWeights = [750, 700, 650, 600, 600, 600]
+codeFontSize = "0.85rem"
+dataframeHeaderBackgroundColor = "#EEF2F8"
 
 [theme.sidebar]
-backgroundColor = "#F3F8FE"
-secondaryBackgroundColor = "#E6F0FC"
-borderColor = "#D6E4F5"
+backgroundColor = "#0B1B36"
+secondaryBackgroundColor = "#13284D"
+textColor = "#E2E8F0"
+borderColor = "#1E3A66"
 
 [client]
 toolbarMode = "minimal"

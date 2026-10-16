@@ -1,44 +1,44 @@
-"""Smoke test: every page of the Streamlit app renders without an exception."""
+"""Smoke tests: every dashboard page renders against the in-process API without exceptions."""
+from pathlib import Path
+
 import pytest
 from streamlit.testing.v1 import AppTest
 
-PAGES = ["home", "how", "api", "demo", "bench", "stress", "registry"]
+PAGES = ["overview", "tools", "drift", "recovery", "audit", "chaos", "health"]
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db(tmp_path, monkeypatch):
+    monkeypatch.setenv("ADAPTIX_DB_PATH", str(tmp_path / "ui.db"))
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    from adaptix.config import get_settings
+    get_settings.cache_clear()
+    import streamlit as st
+    st.cache_resource.clear()
+    yield
+    get_settings.cache_clear()
+    st.cache_resource.clear()
+
+
+def _page(name, timeout=60):
+    at = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"), default_timeout=timeout)
+    at.session_state["_force_page"] = name
+    return at.run()
 
 
 @pytest.mark.parametrize("page", PAGES)
-def test_page_renders(page):
-    at = AppTest.from_string(f'''
-import runpy, streamlit as st
-st.session_state["_force_page"] = "{page}"
-runpy.run_path("app.py", run_name="__main__")
-''', default_timeout=60)
-    at.run()
+def test_page_renders_empty(page):
+    at = _page(page)
     assert not at.exception, at.exception
 
 
-def test_demo_hold_then_approve():
-    at = AppTest.from_string('''
-import runpy, streamlit as st
-st.session_state["_force_page"] = "demo"
-runpy.run_path("app.py", run_name="__main__")
-''', default_timeout=60)
-    at.run()
-    next(b for b in at.button if b.label.startswith("Change the API")).click().run()
-    assert not at.exception
-    assert any(m.value == "Needs approval" for m in at.metric)
-    next(b for b in at.button if b.label.startswith("Approve and retry")).click().run()
-    assert not at.exception
-    assert any("Approved. Retried with tool v2: success" in s.value for s in at.success)
-
-
-def test_benchmark_page_runs_and_compares_agents():
-    at = AppTest.from_string('''
-import runpy, streamlit as st
-st.session_state["_force_page"] = "bench"
-runpy.run_path("app.py", run_name="__main__")
-''', default_timeout=120)
-    at.run()
-    next(b for b in at.button if b.label.startswith("Run 125")).click().run()
-    assert not at.exception
-    agents = list(at.dataframe[0].value["Agent"])
-    assert agents == ["Retry loop (no repair)", "Error-reading greedy repair", "SchemaHeal"]
+def test_chaos_run_then_pages_show_records():
+    at = _page("chaos")
+    at.button[0].click().run()          # "Run scenario" (baseline vs ADAPTIX)
+    assert not at.exception, at.exception
+    assert "chaos_last" in at.session_state and len(at.session_state["chaos_last"]) == 2
+    assert any("SIMULATED" in m.value for m in at.markdown)
+    for page in ["overview", "tools", "drift", "recovery", "audit"]:
+        at.session_state["_force_page"] = page
+        at.run()
+        assert not at.exception, (page, at.exception)

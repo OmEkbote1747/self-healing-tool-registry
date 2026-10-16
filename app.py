@@ -1,64 +1,43 @@
-"""SchemaHeal: Streamlit front end for the PS-01 self-healing tool registry prototype."""
+"""ADAPTIX dashboard. Every page talks to the ADAPTIX API (in-process by default, or ADAPTIX_API_URL)."""
 import streamlit as st
 
-from adaptix import llm
-from adaptix.cases import APPROVED_CONFIG
-from views import api, benchmark, demo, home, how, registry, stress
-from adaptix.security import purge_audit_log
-from views.common import LOG, REPO_URL, ROOT, inject_css
-import os
+from views import audit, chaos, drift, health, overview, recovery, tools
+from views.common import ROOT, api, api_mode, inject_css, safe_call
 
-st.set_page_config(page_title="SchemaHeal · Self-Healing Tool Registry", page_icon=":material/healing:",
+REPO_URL = "https://github.com/Paras131206/self-healing-tool-registry"
+
+st.set_page_config(page_title="ADAPTIX · Autonomous API Resilience", page_icon=":material/autorenew:",
                    layout="wide", initial_sidebar_state="expanded")
 inject_css()
-
-
-@st.cache_resource
-def _apply_retention():
-    """Once per server process: drop audit entries past the retention window."""
-    return purge_audit_log(LOG, int(os.environ.get("SCHEMAHEAL_RETENTION_DAYS", "30")))
-
-
-_apply_retention()
 st.logo(str(ROOT / "assets" / "logo.svg"), size="large", link=REPO_URL)
 
+RENDER = {"overview": overview.render, "tools": tools.render, "drift": drift.render, "recovery": recovery.render,
+          "audit": audit.render, "chaos": chaos.render, "health": health.render}
 pages = {
-    "home": st.Page(home.render, title="Home", icon=":material/home:", url_path="home", default=True),
-    "how": st.Page(how.render, title="How it works", icon=":material/account_tree:", url_path="how-it-works"),
-    "api": st.Page(api.render, title="API & integration", icon=":material/api:", url_path="api"),
-    "demo": st.Page(demo.render, title="Live demo", icon=":material/play_circle:", url_path="demo"),
-    "bench": st.Page(benchmark.render, title="Benchmark (125 cases)", icon=":material/monitoring:", url_path="benchmark"),
-    "stress": st.Page(stress.render, title="Stress tests", icon=":material/science:", url_path="stress-tests"),
-    "registry": st.Page(registry.render, title="Registry & audit log", icon=":material/inventory_2:", url_path="registry"),
+    "overview": st.Page(overview.render, title="Overview", icon=":material/dashboard:", url_path="overview", default=True),
+    "tools": st.Page(tools.render, title="Tool Registry", icon=":material/inventory_2:", url_path="tools"),
+    "drift": st.Page(drift.render, title="Schema Drift Explorer", icon=":material/difference:", url_path="drift"),
+    "recovery": st.Page(recovery.render, title="Recovery Center", icon=":material/healing:", url_path="recovery"),
+    "audit": st.Page(audit.render, title="Audit & Evaluation", icon=":material/fact_check:", url_path="audit"),
+    "chaos": st.Page(chaos.render, title="Chaos Lab", icon=":material/science:", url_path="chaos-lab"),
+    "health": st.Page(health.render, title="System Health", icon=":material/monitor_heart:", url_path="health"),
 }
 st.session_state["_pages"] = pages
-nav = st.navigation({"Overview": [pages["home"], pages["how"], pages["api"]],
-                     "Console": [pages["demo"], pages["bench"], pages["stress"], pages["registry"]]})
+nav = st.navigation({"Monitor": [pages["overview"], pages["tools"], pages["drift"], pages["recovery"]],
+                     "Evidence": [pages["audit"], pages["chaos"]], "System": [pages["health"]]})
 
 with st.sidebar:
-    st.divider()
-    llm_ok = llm.available()
-    st.session_state["use_llm"] = st.toggle("Tier 2: LLM repair proposals", value=llm_ok, disabled=not llm_ok,
-                                            help="Needs ANTHROPIC_API_KEY. When off, anything the rules are unsure "
-                                                 "about stops safely instead of being guessed.")
-    if llm_ok:
-        st.success(f"LLM tier on · {llm.MODEL}", icon=":material/smart_toy:")
-    else:
-        st.info("LLM tier off (no API key). Running rules + validator.", icon=":material/rule:")
-    with st.expander("Safety rules", icon=":material/verified_user:", expanded=True):
-        st.markdown("- Never invent a value\n- Validate before retry\n- Max 2 repair attempts\n"
-                    "- Headers only from approved config")
-        st.caption("Approved config keys: " + ", ".join(APPROVED_CONFIG))
-    with st.expander("Data handling", icon=":material/lock:"):
-        st.markdown("- Header values are never shown or logged\n- Sensitive fields are masked\n"
-                    "- Values echoed in API errors are masked\n- The LLM sees field names and types only\n"
-                    "- Secrets come from the environment, not code\n- Audit log kept "
-                    f"{os.environ.get('SCHEMAHEAL_RETENTION_DAYS', '30')} days")
-    st.caption("PS-01 · Team Runtime Terrors · Genesis 2.0")
+    h = safe_call(api, "GET", "/api/health")
+    if h:
+        llm = h["llm"]
+        st.caption(f"API: {api_mode()} · v{h['version']}")
+        st.caption(f"LLM: {llm['provider']} · {llm['connectivity'].replace('_', ' ')}")
+        if h["simulated_tools"]:
+            st.caption(f"{h['simulated_tools']} simulated tool(s) registered (Chaos Lab)")
+    st.caption("Team Runtime Terrors · PS-01")
 
-# tests can render a specific page directly; normal visitors always go through the navigation
+# tests can render a page directly; visitors always go through the navigation
 if "_force_page" in st.session_state:
-    {"home": home.render, "how": how.render, "api": api.render, "demo": demo.render, "bench": benchmark.render,
-     "stress": stress.render, "registry": registry.render}[st.session_state["_force_page"]]()
+    RENDER[st.session_state["_force_page"]]()
 else:
     nav.run()
