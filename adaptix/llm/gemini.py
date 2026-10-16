@@ -58,6 +58,9 @@ class GeminiProvider:
                  client_factory=None, sleep=time.sleep):
         self.creds, self.model, self.timeout_s, self.max_retries = creds, model, timeout_s, max_retries
         self._factory = client_factory           # tests inject a fake SDK client; production uses the real one
+        # A provider built on an injected test client is a TEST DOUBLE: its results are never labelled real.
+        self.real = client_factory is None
+        self.test_double = client_factory is not None
         self._sleep = sleep
         self._lock = threading.Lock()
         self.last: dict = {}                    # safe metadata of the last real request
@@ -150,7 +153,8 @@ class GeminiProvider:
         self._sleep(min(4.0, 0.5 * 2 ** (attempt - 1)) + random.uniform(0, 0.25))
 
     def _result(self, ok, t0, attempts, cat, err, alias, pt=None, ot=None, plan=None) -> LLMResult:
-        r = LLMResult(provider=self.name, model=self.model, ok=ok, real=attempts > 0, plan=plan, error_category=cat,
+        r = LLMResult(provider=self.name, model=self.model, ok=ok, real=self.real and attempts > 0, plan=plan,
+                      error_category=cat,
                       error=scrub(err) if err else None, duration_ms=round((time.perf_counter() - t0) * 1000, 1),
                       prompt_tokens=pt, output_tokens=ot, credential_alias=alias, attempts=attempts, ts=now_iso())
         with self._lock:

@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS locks (tool TEXT PRIMARY KEY, holder TEXT, expires_at
 CREATE TABLE IF NOT EXISTS checks (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, tool TEXT NOT NULL,
   trigger TEXT, schema_status TEXT, connectivity TEXT, error_category TEXT, drift INTEGER, data TEXT);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS evidence (id TEXT PRIMARY KEY, run_id TEXT, incident_id TEXT, ts TEXT NOT NULL,
+  scenario TEXT, tool TEXT, outcome TEXT, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_checks ON checks (tool, id);
 CREATE INDEX IF NOT EXISTS ix_inc_tool ON incidents (tool, started_at);
 CREATE INDEX IF NOT EXISTS ix_events ON events (tool, ts);
@@ -59,12 +61,16 @@ class IsolationError(RuntimeError):
     """An attempt to mix simulation and production records."""
 
 
+ENVIRONMENT = {"production": "LIVE_API", "real_api_test": "REAL_API_TEST", "simulation": "SIMULATION"}
+
+
 class Storage:
     def __init__(self, path: str | Path, mode: str = "production"):
-        if mode not in ("production", "simulation"):
+        if mode not in ENVIRONMENT:
             raise ValueError(f"unknown storage mode {mode}")
         self.path, self.mode = str(path), mode
         self.simulated = mode == "simulation"
+        self.environment = ENVIRONMENT[mode]
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as c:
@@ -159,7 +165,8 @@ class Storage:
     # ---------------------------------------------------------------- tools and versions
     def register(self, spec: ToolSpec, td: ToolDef, op: Operation):
         self._guard(spec.simulated, "tool")
-        if spec.base_url.startswith("sim://") != self.simulated:
+        if spec.base_url.startswith("sim://") != self.simulated or \
+                (self.mode == "real_api_test" and not spec.base_url.startswith("http://127.0.0.1:")):
             raise IsolationError(f"{spec.base_url} cannot be registered in the {self.mode} store")
         sig = self.save_schema(op)
         td.schema_signature = sig
@@ -280,6 +287,9 @@ class Storage:
     # ---------------------------------------------------------------- incidents and executions
     def save_incident(self, inc: Incident):
         self._guard(inc.simulated, "incident")
+        if inc.environment and inc.environment != self.environment:
+            raise IsolationError(f"refusing to write a {inc.environment} incident into the {self.environment} store")
+        inc.environment = self.environment
         data = json.dumps(redact(inc.model_dump(mode="json")), default=str)
         with self._tx() as c:
             c.execute("INSERT OR REPLACE INTO incidents VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -335,23 +345,21 @@ class Storage:
             n += c.execute("DELETE FROM incidents WHERE started_at < ?", (cutoff,)).rowcount
             n += c.execute("DELETE FROM executions WHERE ts < ?", (cutoff,)).rowcount
             n += c.execute("DELETE FROM checks WHERE ts < ?", (cutoff,)).rowcount
+            n += c.execute("DELETE FROM evidence WHERE ts < ?", (cutoff,)).rowcount
         return n
 
     def reset(self, simulated_only: bool = True):
-        """Remove simulated data (the Simulation Lab's 'reset' action). Refused on the production store."""
-        if not self.simulated:
+        """Clear a test store (Simulation Lab or REAL_API_TEST). Refused on the production store."""
+        if self.mode == "production":
             raise IsolationError("reset is only available on the simulation store")
         with self._tx() as c:
-            names = [json.loads(r["spec"])["name"] for r in c.execute("SELECT spec FROM tools")
-                     if json.loads(r["spec"]).get("simulated") or not simulated_only]
+            names = [json.loads(r["spec"])["name"] for r in c.execute("SELECT spec FROM tools")]
             for n in names:
                 for t in ("versions", "mappings", "locks"):
                     c.execute(f"DELETE FROM {t} WHERE tool=?", (n,))
                 c.execute("DELETE FROM tools WHERE name=?", (n,))
-            w = " WHERE simulated=1" if simulated_only else ""
-            c.execute("DELETE FROM incidents" + w)
-            c.execute("DELETE FROM events" + w)
-            c.execute("DELETE FROM executions" + w)
+            for t in ("incidents", "events", "executions", "checks", "evidence"):
+                c.execute(f"DELETE FROM {t}")
             self.event("reset", None, {"simulated_only": simulated_only, "tools": names}, conn=c)
 
 
@@ -379,6 +387,32 @@ class Storage:
             c.execute("UPDATE tools SET spec=? WHERE name=?", (spec.model_dump_json(), spec.name))
             self.event("tool_settings_updated", spec.name, {"monitor_enabled": spec.monitor_enabled,
                                                             "monitor_interval_s": spec.monitor_interval_s}, conn=c)
+
+
+    # ---------------------------------------------------------------- evidence records (judge-verifiable)
+    def save_evidence(self, ev: dict):
+        if ev.get("environment") != self.environment:
+            raise IsolationError(f"refusing to write {ev.get('environment')} evidence into the {self.environment} store")
+        with self._tx() as c:
+            c.execute("INSERT OR REPLACE INTO evidence VALUES (?,?,?,?,?,?,?,?)",
+                      (ev["evidence_id"], ev.get("run_id"), ev.get("incident_id"), ev["recorded_at"], ev.get("scenario"),
+                       ev.get("api", {}).get("tool"), ev.get("final", {}).get("outcome"),
+                       json.dumps(redact(ev), default=str)))
+
+    def evidence(self, limit: int = 500, run_id: str | None = None) -> list[dict]:
+        q, a = "SELECT data FROM evidence", []
+        if run_id:
+            q += " WHERE run_id=?"
+            a.append(run_id)
+        q += " ORDER BY ts DESC LIMIT ?"
+        a.append(min(limit, 5000))
+        with self._conn() as c:
+            return [json.loads(r["data"]) for r in c.execute(q, a)]
+
+    def evidence_one(self, evidence_id: str) -> dict | None:
+        with self._conn() as c:
+            r = c.execute("SELECT data FROM evidence WHERE id=?", (evidence_id,)).fetchone()
+        return json.loads(r["data"]) if r else None
 
 
 def new_holder() -> str:

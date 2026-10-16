@@ -52,6 +52,10 @@ What is never treated as schema drift: 401/403 (credential problems; failover on
 | `adaptix/netguard.py` | SSRF guard for real egress: approved hosts, https, public IPs only, metadata blocked, DNS pinning with verified TLS, redirect re-validation, per-host pacing, Retry-After cooldown |
 | `adaptix/upstreams.py` | production = guarded real providers only; simulation = in-process `sim://` only |
 | `adaptix/monitor.py` | Real API Monitoring: scheduled and on-demand schema checks, GET probes through the full pipeline |
+| `adaptix/testservice.py` | the controlled, versioned test API (real uvicorn HTTP server on 127.0.0.1) for REAL_API_TEST |
+| `adaptix/realtest.py` | the 12-step end-to-end recovery demonstration and the real-HTTP scenario matrix |
+| `adaptix/evidence.py` | evidence records per run, scorecard with denominators, CSV export |
+| `adaptix/changes.py` | the Schema Changes table: rows from stored records, server-side filters, sorting and pagination |
 | `adaptix/integrations.py` | Integration Health statuses (VERIFIED only from recorded real requests) |
 | `adaptix/verify.py` | task verification (status/echo outputs, or the authoritative response schema for read operations) |
 | `adaptix/api.py` | FastAPI backend: production `/api/*`, simulation `/api/sim/*`, monitoring, integrations, OpenAI adapter |
@@ -115,6 +119,60 @@ Rules:
 - **Polite to providers.** The minimum interval is 5 minutes, there is at most one request per host per second, and a 429's Retry-After is honoured.
 - **Errors are not drift.** Authentication, authorization, quota, network, TLS and business-rule failures are reported with their category and never repaired as schema drift. A rejected key is never altered.
 - **Providers without a schema** are registered with declared fields. These are *not* authoritative: drift cannot be verified, the tool is never repaired, and the page says so.
+
+## Real API Test: a controlled, reproducible recovery
+
+The **REAL_API_TEST** environment uses a small versioned API that ADAPTIX itself controls. It is served by a real HTTP server (uvicorn on a loopback TCP socket) with an authoritative OpenAPI document. No third-party API is modified. The guard exempts only that server's exact address; any other loopback port, private address or `sim://` URL is still refused. Records go to their own database (`ADAPTIX_TEST_DB_PATH`).
+
+**End-to-end demonstration** (Real API Test page, or `POST /api/test/demo`). The schema change: `customer_id` becomes `client_id`.
+
+1. **Preflight.** The test service answers over HTTP, and Gemini answers a real minimal request. If either fails, the run stops with an actionable error and nothing falls back.
+2. **Original task on schema v1.** The order is placed. The request, response, schema fingerprint and version are recorded, and the business outcome is confirmed by reading the stored order back (`GET /orders/{id}`).
+3. **Controlled schema change.** The test service switches to v2 through its token-protected admin API.
+4. **The original request now fails.** It is sent unchanged and fails with HTTP 422, classified as schema drift using the authoritative diff.
+5. **Repair.** ADAPTIX runs with the **LLM required**: real Gemini proposes the mapping, quoting the schema. The rules plan is recorded only as a cross-check.
+6. **Validation and apply.** The independent validator accepts or rejects the proposal. The registry moves v1 → v2 with a version check, and the call is retried with the same idempotency key.
+7. **Verification.** The API's answer is verified, then the order is **read back independently** to confirm the intended customer, product and quantity.
+8. **Failure demo (`fault: drop_writes`).** v2 answers "created" but stores nothing. The read-back fails, the registry is rolled back to v1, and the order is **not** re-sent.
+
+**Scenario matrix** (`POST /api/test/matrix`). 15 change types run over real HTTP against the same service:
+
+- rename (by name, documented, prose-only);
+- safe and lossy type changes;
+- new required field;
+- removed field;
+- nested request and response changes;
+- ambiguous rename;
+- invalid credential and expired-key failover;
+- 429 with Retry-After, and a 503 outage;
+- a repair that fails verification.
+
+The LLM choice is rules only or real Gemini. The mock is refused here.
+
+**Evidence.** Every run (REAL_API_TEST, SIMULATION, and production incidents) produces an evidence record with:
+
+- the run and incident IDs, the environment and the evidence source;
+- the sanitized endpoint and schema fingerprints before and after;
+- the original request and the redacted response, the HTTP status and the classification;
+- the schema diff;
+- the Gemini model and whether a real request was made;
+- the proposal, the validation decision and the applied version diff;
+- retries, timestamps and elapsed time;
+- the API-reported and the independent business verification;
+- rollback, and audit references.
+
+Inspect it on **Evidence & Scorecard**, or export `GET /api/test/evidence/export.json` and `/export.csv`. Secrets and sensitive fields are redacted.
+
+**Results measured on 2026-10-16** (REAL_API_TEST, one run per scenario):
+
+| Run | Outcomes as expected | Verified recoveries / eligible | Unsafe repairs accepted | False-positive drift | Real Gemini requests |
+|---|---|---|---|---|---|
+| Matrix, rules only | 15 / 15 | 7 / 7 | 0 | 0 / 15 | 0 |
+| Matrix, real Gemini | 15 / 15 | 8 / 8 (adds the prose-documented rename) | 0 | 0 / 15 | 3 |
+| Orders demo | recovered, business outcome verified | 1 / 1 | 0 | 0 | 2 (preflight + proposal) |
+| Orders demo, failure | rolled back, correctly | — | 0 | 0 | 2 |
+
+These are small demonstration samples against a test service we control, not a reliability guarantee. Gemini's response time on these runs was 3–37 s per request; the rules-only repairs took a few milliseconds.
 
 ## Simulation Lab and data separation
 
@@ -187,19 +245,43 @@ The repairable cases ADAPTIX did not recover are **safe misses**: it stopped ins
 
 ## Tests
 
-`python -m pytest -q` → 188 passed, 4 skipped on 2026-10-16. The skipped tests are live tests:
+Run everything that needs no network or key:
 
-- **`tests/test_gemini_live.py`** needs `GEMINI_API_KEY`. It passed on 2026-10-16 with a real key.
-- **`tests/test_live_api.py`** needs `ADAPTIX_LIVE_API_TESTS=1` and makes read-only calls to the public Swagger Petstore through the real guard. It passed on 2026-10-16.
+```bash
+python -m pytest -q          # 211 passed, 5 skipped (2026-10-16); the 5 skipped are the live tests
+```
 
-The suite covers:
+| Category | Files | What it means |
+|---|---|---|
+| Unit tests | `test_units.py`, `test_netguard.py`, `test_changes.py` (row/query parts) | pure logic; DNS and HTTP faked where needed |
+| Pipeline and simulation tests | `test_pipeline.py`, `test_isolation.py`, `test_gemini.py` | in-process simulated APIs; Gemini via a fake SDK client (a **test double**, labelled "not a real request") |
+| Mocked integration tests | `test_api.py`, `test_monitoring.py` | the full API with a fake network layer (`tests/fakes.py`) standing in for an approved HTTPS provider |
+| **Controlled real HTTP API tests** | `test_realtest.py` | a real uvicorn server on 127.0.0.1, real TCP requests through the guard; no internet or key needed. Model behaviour comes from the labelled test double |
+| **External live tests** (opt-in) | `test_gemini_live.py` (needs `GEMINI_API_KEY`), `test_live_api.py` (needs `ADAPTIX_LIVE_API_TESTS=1`) | real Gemini requests, including the end-to-end demo, and read-only calls to the public Swagger Petstore. All 5 passed on 2026-10-16 |
+| Dashboard smoke tests | `test_ui.py` | every page renders; Changes table filters, empty state and clear filters |
 
-- **Simulation Lab:** every scenario plus baseline mode, repeatability (same seed, same result) and LLM labelling (mock vs real).
-- **Separation:** each store refuses the other world's records, upstreams refuse the wrong world, production never uses the mock, legacy mixed databases are cleaned.
-- **Real-mode monitoring** (with a test-only fake transport, `tests/fakes.py`): no-drift results, drift with and without a probe, autonomous repair and verification, rollback, unsupported repairs stopping, auth / business-rule / network failures never treated as drift, unavailable schemas failing closed, schema-less providers, probe and interval rules, the scheduler.
-- **SSRF guard:** the allowlist, private/loopback/metadata/IPv4-mapped addresses, IP literals, schemes, credentials in URLs, DNS pinning, redirect re-validation, write requests never redirected, the Retry-After cooldown, pacing, TLS on.
-- **Classification, validation and transport:** classification, the validator (including "no caller value silently dropped"), transforms, credential failover, the Gemini adapter, and the API (auth, 413, CORS, analyze-without-sending, the OpenAI adapter, no secret leakage).
-- **Dashboard:** smoke tests for all 12 pages.
+```bash
+GEMINI_API_KEY=... python -m pytest -q tests/test_gemini_live.py
+ADAPTIX_LIVE_API_TESTS=1 python -m pytest -q tests/test_live_api.py
+```
+
+## Reproduce the demonstration from a clean state
+
+```bash
+git clone https://github.com/Paras131206/self-healing-tool-registry && cd self-healing-tool-registry
+python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+export GEMINI_API_KEY=...            # your own key, server-side only
+.venv/bin/streamlit run app.py
+```
+
+Then:
+
+1. **Real API Test → Check service and Gemini.** Both should show VERIFIED.
+2. **Run the recovery demo.** Six steps should complete, ending in "verified recovery".
+3. **Run the failure demo.** It should end "rolled back", with the business read-back failing.
+4. **Scenario matrix → Run the matrix,** rules only or real Gemini.
+5. **Evidence & Scorecard → REAL API TEST.** Inspect the records and export the JSON bundle or CSV.
+6. **Schema Changes.** Filter by environment or change type and open a row.
 
 ## Limitations
 
@@ -207,6 +289,7 @@ The suite covers:
 - Real Gemini calls were verified on 2026-10-16. Google can return `503 high demand` for a model; ADAPTIX retries a bounded number of times and otherwise stops safely.
 - Name similarity and documentation cannot prove two fields mean the same thing. When the evidence is not explicit, ADAPTIX stops.
 - SQLite suits one host. Multiple instances need a shared database and a distributed lock. Credential state is in memory.
+- The REAL_API_TEST service runs inside the ADAPTIX process on loopback, over http (TLS is used for every remote provider). It demonstrates a real HTTP recovery we control. It is not an independent third-party API.
 - On Streamlit Cloud the SQLite files are ephemeral, so records (including monitoring history) reset when the app restarts, and the scheduler only runs while the app is awake.
 - A monitoring probe verifies a read operation by checking the response against the provider's own schema. That proves the shape of the result, not its business meaning.
 - Drift detection relies on the provider's published schema being accurate; an undocumented change is only caught when it breaks a real call.

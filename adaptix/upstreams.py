@@ -2,6 +2,8 @@
 
 * production: REAL providers only, every request through the SSRF guard (allowlist, public IPs, DNS
   pinning, verified TLS, validated redirects, per-host pacing). sim:// endpoints are refused.
+* real_api_test: the controlled test service ADAPTIX runs itself (a real HTTP server on loopback), through
+  the same guard; only that exact address is exempt from the allowlist. sim:// is refused.
 * simulation: in-process simulated APIs (sim://name) only. Nothing leaves the process; any real URL is
   refused, so a simulated schema mutation can never be sent to a real provider.
 """
@@ -14,7 +16,7 @@ import httpx
 
 from .netguard import EgressDenied, GuardedHTTP
 
-MODES = ("production", "simulation")
+MODES = ("production", "real_api_test", "simulation")
 
 
 class Upstreams:
@@ -23,7 +25,7 @@ class Upstreams:
         if mode not in MODES:
             raise ValueError(f"unknown mode {mode}")
         self.mode, self.timeout_s, self.max_schema_bytes = mode, timeout_s, max_schema_bytes
-        self.guard = guard if guard is not None else (GuardedHTTP((), timeout_s=timeout_s) if mode == "production" else None)
+        self.guard = guard if guard is not None else (GuardedHTTP((), timeout_s=timeout_s) if mode != "simulation" else None)
         self._sim_clients: dict[str, object] = {}
         self._sim_apps: dict[str, object] = {}
         self._lock = threading.Lock()
@@ -54,8 +56,8 @@ class Upstreams:
 
     def _check_mode(self, url: str):
         sim = self.is_simulated(url)
-        if self.mode == "production" and sim:
-            raise EgressDenied("simulated_in_production", "sim:// endpoints are not allowed in production mode")
+        if self.mode != "simulation" and sim:
+            raise EgressDenied("simulated_in_production", f"sim:// endpoints are not allowed in {self.mode} mode")
         if self.mode == "simulation" and not sim:
             raise EgressDenied("real_in_simulation", "the Simulation Lab never contacts real providers")
 

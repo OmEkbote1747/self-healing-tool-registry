@@ -78,7 +78,7 @@ def run(engine, suite: str = "scenarios", seed: int = 7, progress=None) -> dict:
         total = len(items) * 2
         for i, s in enumerate(items):
             for heal in (False, True):
-                r = sim.run(engine, s.id, seed=seed, heal=heal)
+                r = sim.run(engine, s.id, seed=seed, heal=heal, evidence_run=f"eval-{run_id}")
                 inc = engine.storage.incident(r["incident"]) if r.get("incident") else None
                 rows.append({"case": s.id, "category": s.group, "change": s.title, "mode": r["mode"],
                              "expected": r["expected"], "outcome": r["outcome"], "correct": r["matches_expectation"],

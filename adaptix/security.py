@@ -18,6 +18,8 @@ MASK = "***"
 SENSITIVE = re.compile(r"(auth|api[-_]?key|^token$|[-_]token$|^bearer|secret|password|passwd|cookie|"
                        r"session[-_]?(id|key|token)?$|signature|ssn|card|cvv|iban|account[-_]?number|\bpin\b|otp)", re.I)
 SAFE_HEADERS = {"content-type", "accept", "x-client-version", "idempotency-key"}
+# keys that match the pattern above but never hold secrets (schema fingerprints, metric names)
+SAFE_KEYS = {"old_signature", "new_signature", "schema_signature", "live_signature", "scorecard"}
 
 
 _KNOWN_SECRETS: set[str] = set()
@@ -45,7 +47,7 @@ def _shape(v) -> str:
 
 def redact(obj, key: str | None = None):
     """Return a copy of obj that is safe to display or log."""
-    if key is not None and SENSITIVE.search(str(key)):
+    if key is not None and str(key) not in SAFE_KEYS and SENSITIVE.search(str(key)):
         return MASK
     if isinstance(obj, dict):
         return {k: redact(v, k) for k, v in obj.items()}

@@ -21,6 +21,26 @@ def render():
     c3.markdown(f"**LLM** &nbsp; `{llm['provider']}` · {llm['connectivity'].replace('_', ' ')}")
     c4.markdown(f"**Approved hosts** &nbsp; {len(health['allowed_hosts'])}")
 
+    ov = safe_call(api, "GET", "/api/overview") or {}
+    st.subheader("Across environments (persisted records)")
+    cols = st.columns(3)
+    for col, (env, label) in zip(cols, (("LIVE_API", "REAL API"), ("REAL_API_TEST", "REAL API TEST"),
+                                        ("SIMULATION", "SIMULATION"))):
+        o = ov.get(env)
+        if not o:
+            continue
+        sc = o["scorecard"]
+        with col.container(border=True):
+            st.markdown(f"**{label}**")
+            st.caption(o["source"])
+            st.markdown(f"Incidents **{o['incidents']}** · recovered **{o['recovered']}** · unresolved **{o['unresolved']}**")
+            st.markdown(f"Verified recoveries **{sc['verified_recoveries']}/{sc['eligible_incidents']}** eligible · "
+                        f"unsafe repairs accepted **{sc['unsafe_repairs_accepted']}**")
+            st.caption(f"{o['evidence_records']} evidence record(s) · {o['tools']} tool(s) · "
+                       f"{sc['real_llm_requests']} real Gemini request(s)")
+    st.caption("Counts come from the stored records of each environment; nothing on this page is hard-coded. "
+               "Small samples are demonstrations, not reliability guarantees.")
+    st.subheader("Real APIs (production)")
     tools = mon["tools"]
     checks = [t["last_check"] for t in tools if t["last_check"]]
     kpis([

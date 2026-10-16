@@ -1,9 +1,10 @@
 """ADAPTIX dashboard. Every page talks to the ADAPTIX API (in-process by default, or ADAPTIX_API_URL).
 
-Production pages read /api/* (real APIs only); Simulation Lab pages read /api/sim/* (a separate database)."""
+Three separate environments, each with its own database: production (/api, real providers),
+REAL_API_TEST (/api/test, the controlled test service over real HTTP) and SIMULATION (/api/sim)."""
 import streamlit as st
 
-from views import audit, chaos, drift, health, monitoring, overview, recovery, tools
+from views import audit, changes, chaos, drift, evidence, health, monitoring, overview, realtest, recovery, tools
 from views.common import ROOT, api, api_mode, inject_css, safe_call
 
 REPO_URL = "https://github.com/Paras131206/self-healing-tool-registry"
@@ -12,6 +13,14 @@ st.set_page_config(page_title="ADAPTIX · Autonomous API Resilience", page_icon=
                    layout="wide", initial_sidebar_state="expanded")
 inject_css()
 st.logo(str(ROOT / "assets" / "logo.svg"), size="large", link=REPO_URL)
+
+
+def recovery_center():
+    recovery.render()
+
+
+def test_records():
+    recovery.render("/api/test")
 
 
 def sim_tools():
@@ -31,27 +40,34 @@ def sim_evaluation():
 
 
 RENDER = {"overview": overview.render, "monitoring": monitoring.render, "tools": tools.render, "drift": drift.render,
-          "recovery": recovery.render, "audit": audit.render, "chaos": chaos.render, "sim_records": sim_records,
-          "sim_eval": sim_evaluation, "sim_tools": sim_tools, "sim_drift": sim_drift, "health": health.render}
+          "recovery": recovery_center, "audit": audit.render, "realtest": realtest.render, "test_records": test_records,
+          "chaos": chaos.render, "sim_records": sim_records, "sim_eval": sim_evaluation, "sim_tools": sim_tools,
+          "sim_drift": sim_drift, "changes": changes.render, "evidence": evidence.render, "health": health.render}
 P = st.Page
 pages = {
     "overview": P(overview.render, title="Overview", icon=":material/dashboard:", default=True),
     "monitoring": P(monitoring.render, title="Real API Monitoring", icon=":material/monitor_heart:", url_path="monitoring"),
     "tools": P(tools.render, title="Tool Registry", icon=":material/inventory_2:", url_path="tools"),
     "drift": P(drift.render, title="Schema Drift Explorer", icon=":material/difference:", url_path="drift"),
-    "recovery": P(recovery.render, title="Recovery Center", icon=":material/healing:", url_path="recovery"),
+    "recovery": P(recovery_center, title="Recovery Center", icon=":material/healing:", url_path="recovery"),
     "audit": P(audit.render, title="Production Audit", icon=":material/fact_check:", url_path="audit"),
+    "realtest": P(realtest.render, title="Real API Test", icon=":material/lan:", url_path="real-api-test"),
+    "test_records": P(test_records, title="Real API Test Records", icon=":material/receipt_long:", url_path="real-api-test-records"),
     "chaos": P(chaos.render, title="Simulation Lab", icon=":material/science:", url_path="simulation-lab"),
     "sim_records": P(sim_records, title="Simulation Records", icon=":material/history:", url_path="simulation-records"),
     "sim_eval": P(sim_evaluation, title="Simulation Evaluation", icon=":material/query_stats:", url_path="simulation-evaluation"),
     "sim_tools": P(sim_tools, title="Simulated Tools", icon=":material/inventory:", url_path="simulation-tools"),
     "sim_drift": P(sim_drift, title="Simulated Drift", icon=":material/compare_arrows:", url_path="simulation-drift"),
-    "health": P(health.render, title="Integration Health", icon=":material/verified:", url_path="integrations"),
+    "changes": P(changes.render, title="Schema Changes", icon=":material/table_rows:", url_path="changes"),
+    "evidence": P(evidence.render, title="Evidence & Scorecard", icon=":material/gavel:", url_path="evidence"),
+    "health": P(health.render, title="System Health", icon=":material/verified:", url_path="integrations"),
 }
 st.session_state["_pages"] = pages
 nav = st.navigation({
     "Production (real APIs)": [pages[k] for k in ("overview", "monitoring", "tools", "drift", "recovery", "audit")],
+    "Real API Test (controlled service)": [pages["realtest"], pages["test_records"]],
     "Simulation Lab (simulated)": [pages[k] for k in ("chaos", "sim_records", "sim_eval", "sim_tools", "sim_drift")],
+    "Evidence": [pages["changes"], pages["evidence"]],
     "System": [pages["health"]]})
 
 with st.sidebar:

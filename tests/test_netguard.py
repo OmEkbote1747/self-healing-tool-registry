@@ -134,6 +134,18 @@ def test_retry_after_cooldown_sends_nothing_until_it_expires(dns):
     assert e.value.category == "rate_limited_local" and len(sent) == 1 and g.cooldown("api.example.com") > 100
 
 
+def test_short_retry_after_is_waited_out_not_refused(dns):
+    sent, sleeps = [], []
+
+    def handler(req):
+        sent.append(1)
+        return httpx.Response(429, headers={"retry-after": "0.2"}) if len(sent) == 1 else httpx.Response(200, json={})
+    g = _guard(handler, sleeps)
+    assert g.request("GET", "https://api.example.com/").status_code == 429
+    assert g.request("GET", "https://api.example.com/").status_code == 200
+    assert len(sent) == 2 and sleeps and 0 < sleeps[-1] <= 0.2
+
+
 def test_per_host_pacing(dns):
     sleeps = []
     g = GuardedHTTP(ALLOWED, min_interval_s=1.0, sleep=sleeps.append)

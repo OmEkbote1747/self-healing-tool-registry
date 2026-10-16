@@ -18,16 +18,18 @@ from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import evaluation, integrations, metrics, simulation
+from . import changes as changes_mod
+from . import evaluation, integrations, metrics, realtest, simulation
+from . import evidence as evidence_mod
 from .config import Settings, get_settings
 from .credentials import CredentialRegistry
 from .engine import Engine, EngineError
 from .llm import NoProvider, is_live, make_provider
 from .llm.mock import MockProvider
-from .models import ToolSpec
+from .models import ToolSpec, now_iso
 from .monitor import Monitor, MonitorError
 from .netguard import GuardedHTTP
 from .security import redact, scrub
@@ -67,6 +69,19 @@ class EvaluationIn(BaseModel):
     llm: LLMChoice = "none"
 
 
+class DemoIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    fault: Literal["drop_writes"] | None = None
+
+
+class MatrixIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scenarios: list[str] | None = None
+    runs: int = Field(default=1, ge=1, le=5)
+    llm: Literal["none", "gemini"] = "none"
+    seed: int = Field(default=7, ge=0, le=10_000)
+
+
 class MonitorSettingsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool | None = None
@@ -90,8 +105,9 @@ class State:
                  llm=None, sleep=time.sleep, sim_storage: Storage | None = None, guard: GuardedHTTP | None = None,
                  start_monitor: bool | None = None):
         self.settings = settings
-        if storage is None and sim_storage is None and settings.db_path == settings.sim_db_path:
-            raise IsolationError("ADAPTIX_DB_PATH and ADAPTIX_SIM_DB_PATH must be different files")
+        if storage is None and sim_storage is None and len({settings.db_path, settings.sim_db_path,
+                                                             settings.test_db_path}) < 3:
+            raise IsolationError("ADAPTIX_DB_PATH, ADAPTIX_SIM_DB_PATH and ADAPTIX_TEST_DB_PATH must be different files")
         self.storage = storage or Storage(settings.db_path, mode="production")
         self.creds = creds or CredentialRegistry.from_env()
         self.llm = llm if llm is not None else make_provider(settings, self.creds, mode="production")
@@ -105,13 +121,38 @@ class State:
         self.sim_creds = CredentialRegistry([])          # throwaway simulated keys only
         self.sim_engine = Engine(self.sim_storage, self.sim_creds, NoProvider(), settings,
                                  Upstreams(settings.request_timeout_s, "simulation"), sleep=sleep)
+        # REAL_API_TEST: the controlled test service (started on first use) and its own records
+        test_path = settings.test_db_path if storage is None else str(self.storage.path) + ".test"
+        self.test_storage = Storage(test_path, mode="real_api_test")
+        self.test_creds = CredentialRegistry([])          # throwaway keys for the controlled service only
+        self.test_engine = Engine(self.test_storage, self.test_creds, NoProvider(), settings,
+                                  Upstreams(settings.request_timeout_s, "real_api_test",
+                                            GuardedHTTP((), timeout_s=settings.request_timeout_s, min_interval_s=0),
+                                            settings.max_schema_bytes), sleep=sleep)
+        self.test_service = None
+        self.test_lock = threading.Lock()
+        self._svc_lock = threading.Lock()
         self.monitor = Monitor(self.engine, settings)
         self.started = time.time()
         self.lock = threading.Lock()
         self.storage.purge(settings.retention_days)
         self.sim_storage.purge(settings.retention_days)
+        self.test_storage.purge(settings.retention_days)
         if start_monitor if start_monitor is not None else settings.monitor_enabled:
             self.monitor.start()
+
+    def test_service_started(self):
+        """Start the controlled test service once; only its exact address is exempt from the egress allowlist."""
+        from .security import register_secret
+        from .testservice import TestService
+        with self._svc_lock:
+            if self.test_service is None or not self.test_service.running():
+                self.test_service = TestService().start()
+                register_secret(self.test_service.admin_token)
+                self.test_engine.upstreams.guard = GuardedHTTP(
+                    (), timeout_s=self.settings.request_timeout_s, min_interval_s=0,
+                    exempt=frozenset({self.test_service.address}))
+        return self.test_service
 
     def sim_llm(self, choice: str):
         """LLM for a simulation run. 'gemini' is the real provider (labelled real); 'mock' is labelled mock."""
@@ -273,11 +314,99 @@ def create_app(state: State | None = None) -> FastAPI:
         def get_metrics():
             return metrics.compute(storage, None) | {"world": storage.mode}
 
-        for fn in (tools, tool, versions, drift, rollback, delete, incidents, incident, audit, get_metrics):
+        @app.get(f"{prefix}/evidence", dependencies=[Depends(admin)])
+        def evidence_list(run_id: str | None = None, limit: int = Query(200, ge=1, le=2000)):
+            return storage.evidence(limit, run_id)
+
+        @app.get(f"{prefix}/evidence/export.json", dependencies=[Depends(admin)])
+        def evidence_json(run_id: str | None = None):
+            recs = storage.evidence(5000, run_id)
+            return {"environment": storage.environment, "exported_at": now_iso(),
+                    "records": recs, "scorecard": evidence_mod.scorecard(recs),
+                    "note": "Redacted: no API keys, authorization headers, passwords or sensitive fields."}
+
+        @app.get(f"{prefix}/evidence/export.csv", dependencies=[Depends(admin)], response_class=PlainTextResponse)
+        def evidence_csv(run_id: str | None = None):
+            return PlainTextResponse(evidence_mod.to_csv(storage.evidence(5000, run_id)), media_type="text/csv")
+
+        @app.get(prefix + "/evidence/{evidence_id}", dependencies=[Depends(admin)])
+        def evidence_one(evidence_id: str):
+            return storage.evidence_one(evidence_id) or not_found(evidence_id)
+
+        @app.get(f"{prefix}/scorecard", dependencies=[Depends(admin)])
+        def scorecard(run_id: str | None = None):
+            return evidence_mod.scorecard(storage.evidence(5000, run_id)) | {"environment": storage.environment}
+
+        for fn in (tools, tool, versions, drift, rollback, delete, incidents, incident, audit, get_metrics,
+                   evidence_list, evidence_json, evidence_csv, evidence_one, scorecard):
             fn.__name__ = f"{storage.mode}_{fn.__name__}"
 
     mount("/api", st.storage, st.engine)
+    mount("/api/test", st.test_storage, st.test_engine)
     mount("/api/sim", st.sim_storage, st.sim_engine)
+
+    # ---------------------------------------------------------------- REAL_API_TEST: controlled test service
+    @app.get("/api/test/status", dependencies=[Depends(admin)])
+    def test_status():
+        """Cheap status (no Gemini request): is the service running, is Gemini configured."""
+        svc = st.test_service
+        return {"service_running": bool(svc and svc.running()), "service_url": svc.url if svc and svc.running() else None,
+                "service_state": svc.orders_state() if svc and svc.running() else None,
+                "gemini_configured": is_live(st.llm), "gemini_model": st.llm.status().get("model"),
+                "matrix": [{"scenario": sid, "change_type": label} for sid, label in realtest.MATRIX]}
+
+    @app.post("/api/test/preflight", dependencies=[Depends(admin)])
+    def test_preflight():
+        """Starts the service if needed and sends ONE minimal real Gemini request."""
+        return realtest.preflight(st, check_llm=True)
+
+    @app.post("/api/test/demo", dependencies=[Depends(admin)])
+    def test_demo(body: DemoIn):
+        return realtest.run_orders_demo(st, body.fault)
+
+    @app.post("/api/test/matrix", dependencies=[Depends(admin)])
+    def test_matrix(body: MatrixIn):
+        unknown = [s for s in body.scenarios or [] if s not in simulation.BY_ID]
+        if unknown:
+            raise HTTPException(422, {"error": "unknown_scenario", "detail": ", ".join(unknown)})
+        try:
+            return realtest.run_matrix(st, body.scenarios, body.runs, body.llm, body.seed)
+        except realtest.RealTestError as e:
+            raise HTTPException(409, {"error": "not_available", "detail": str(e)})
+
+    @app.post("/api/test/reset", dependencies=[Depends(admin)])
+    def test_reset():
+        st.test_storage.reset()
+        return {"reset": True, "scope": "REAL_API_TEST database only"}
+
+    # ---------------------------------------------------------------- cross-environment views (labelled)
+    def worlds(environment: list[str] | None = None) -> dict:
+        all_w = {"LIVE_API": st.storage, "REAL_API_TEST": st.test_storage, "SIMULATION": st.sim_storage}
+        return {k: v for k, v in all_w.items() if not environment or k in environment}
+
+    @app.get("/api/changes", dependencies=[Depends(admin)])
+    def list_changes(q: str = "", environment: list[str] = Query(default=[]), change_type: list[str] = Query(default=[]),
+                     repair_status: list[str] = Query(default=[]), verification: list[str] = Query(default=[]),
+                     since: str | None = None, until: str | None = None,
+                     sort: Literal["timestamp", "tool", "change_type", "status"] = "timestamp",
+                     order: Literal["asc", "desc"] = "desc", page: int = Query(1, ge=1),
+                     page_size: int = Query(25, ge=1, le=200)):
+        rows = changes_mod.collect(worlds())
+        return changes_mod.query(rows, q, environment or None, change_type or None, repair_status or None,
+                                 verification or None, since, until, sort, order, page, page_size)
+
+    @app.get("/api/overview", dependencies=[Depends(admin)])
+    def overview():
+        out = {}
+        for env, storage in worlds().items():
+            incs = storage.incidents(limit=5000)
+            ev = storage.evidence(5000)
+            out[env] = {"incidents": len(incs), "recovered": sum(i.status == "recovered" for i in incs),
+                        "unresolved": sum(i.status in ("stopped", "failed", "rolled_back") for i in incs),
+                        "schema_drift": sum(i.category == "schema_drift" for i in incs),
+                        "evidence_records": len(ev), "scorecard": evidence_mod.scorecard(ev),
+                        "tools": len(storage.tools()), "source": evidence_mod.SOURCE[env]}
+        return out
 
     # ---------------------------------------------------------------- production only: real tools
     @app.post("/api/tools", status_code=201, dependencies=[Depends(admin)])

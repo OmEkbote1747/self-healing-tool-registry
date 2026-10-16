@@ -118,6 +118,7 @@ class Incident(BaseModel):
     simulated: bool = False
     scenario: str | None = None
     healing: bool = True                    # False only for baseline comparison runs (repair disabled)
+    environment: str = ""                   # LIVE_API | REAL_API_TEST | SIMULATION (set by the store)
     started_at: str = Field(default_factory=now_iso)
     finished_at: str | None = None
     category: str = "unknown"

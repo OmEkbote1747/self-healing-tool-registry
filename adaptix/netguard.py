@@ -86,8 +86,12 @@ class Target:
     ip: str
 
 
-def check_url(url: str, allowed: tuple[str, ...], allow_http: bool = False) -> Target:
-    """Validate a URL for real egress. Raises EgressDenied; sends nothing."""
+def check_url(url: str, allowed: tuple[str, ...], allow_http: bool = False,
+              exempt: frozenset = frozenset()) -> Target:
+    """Validate a URL for real egress. Raises EgressDenied; sends nothing.
+
+    `exempt` holds exact (host, port) pairs of the controlled test service that ADAPTIX itself runs on
+    loopback (REAL_API_TEST environment). Nothing else can bypass the allowlist or the address checks."""
     if url.startswith("sim://"):
         raise EgressDenied("simulated_in_production", "sim:// endpoints are simulations and are never real APIs")
     try:
@@ -95,13 +99,17 @@ def check_url(url: str, allowed: tuple[str, ...], allow_http: bool = False) -> T
         port = parts.port
     except ValueError:
         raise EgressDenied("invalid_url", "the URL could not be parsed") from None
-    if parts.scheme not in ("https", "http") or (parts.scheme == "http" and not allow_http):
+    exempt_hit = parts.scheme in ("http", "https") and ((parts.hostname or "").lower(),
+                                                         port or (443 if parts.scheme == "https" else 80)) in exempt
+    if parts.scheme not in ("https", "http") or (parts.scheme == "http" and not allow_http and not exempt_hit):
         raise EgressDenied("scheme_not_allowed", f"scheme '{parts.scheme}' is not allowed (https required)")
     if parts.username or parts.password:
         raise EgressDenied("invalid_url", "credentials embedded in URLs are not allowed")
     host = (parts.hostname or "").lower().rstrip(".")
     if not host:
         raise EgressDenied("invalid_url", "the URL has no host")
+    if exempt_hit:
+        return Target(url, host, port or 80, host)
     if host in METADATA_HOSTS:
         raise EgressDenied("private_address", f"{host} is a cloud metadata endpoint")
     if not host_allowed(host, allowed):
@@ -113,8 +121,9 @@ def check_url(url: str, allowed: tuple[str, ...], allow_http: bool = False) -> T
 
 class GuardedHTTP:
     def __init__(self, allowed: tuple[str, ...], allow_http: bool = False, timeout_s: float = 10.0,
-                 max_redirects: int = 3, min_interval_s: float = 1.0, sleep=time.sleep):
-        self.allowed, self.allow_http = allowed, allow_http
+                 max_redirects: int = 3, min_interval_s: float = 1.0, sleep=time.sleep,
+                 exempt: frozenset = frozenset()):
+        self.allowed, self.allow_http, self.exempt = allowed, allow_http, frozenset(exempt)
         self.timeout_s, self.max_redirects, self.min_interval_s = timeout_s, max_redirects, min_interval_s
         self._sleep = sleep
         self._client = httpx.Client(timeout=httpx.Timeout(timeout_s), follow_redirects=False, verify=True,
@@ -123,13 +132,16 @@ class GuardedHTTP:
         self._next: dict[str, float] = {}         # host -> earliest next request (monotonic)
         self._cooldown: dict[str, float] = {}     # host -> 429 cooldown end (monotonic)
 
+    MAX_COOLDOWN_WAIT_S = 5.0                  # wait out short Retry-After periods; refuse longer ones
+
     def _pace(self, host: str):
         with self._lock:
             now = time.monotonic()
-            if self._cooldown.get(host, 0) > now:
+            remaining = self._cooldown.get(host, 0) - now
+            if remaining > self.MAX_COOLDOWN_WAIT_S:
                 raise EgressDenied("rate_limited_local", f"{host} asked us to wait (Retry-After); "
-                                                         f"{self._cooldown[host] - now:.0f}s remaining")
-            wait = max(0.0, self._next.get(host, 0) - now)
+                                                         f"{remaining:.0f}s remaining")
+            wait = max(0.0, self._next.get(host, 0) - now, remaining)
             self._next[host] = now + wait + self.min_interval_s
         if wait:
             self._sleep(wait)
@@ -152,8 +164,11 @@ class GuardedHTTP:
         """One guarded request. Redirects are re-validated hop by hop (GET/HEAD only)."""
         method = method.upper()
         for hop in range(self.max_redirects + 1):
-            t = check_url(url, self.allowed, self.allow_http)
-            self._pace(t.host)
+            t = check_url(url, self.allowed, self.allow_http, self.exempt)
+            key = t.host
+            if (t.host, t.port) in self.exempt:      # the controlled test service hosts independent apps
+                key = t.host + "/" + "/".join(urlsplit(url).path.split("/")[1:3])
+            self._pace(key)
             r = self._send(method, t, **dict(kw))
             if r.status_code == 429:
                 ra = r.headers.get("retry-after")
@@ -161,8 +176,8 @@ class GuardedHTTP:
                     secs = float(ra) if ra is not None else 30.0
                 except ValueError:
                     secs = 30.0
-                with self._lock:
-                    self._cooldown[t.host] = time.monotonic() + min(max(secs, 1.0), 3600.0)
+                with self._lock:                    # exactly what the provider asked for (bounded)
+                    self._cooldown[key] = time.monotonic() + min(max(secs, 0.0), 3600.0)
             if r.status_code in (301, 302, 303, 307, 308) and r.headers.get("location"):
                 if method not in ("GET", "HEAD"):
                     return r                       # never re-send a write to another location

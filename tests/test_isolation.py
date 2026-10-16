@@ -102,7 +102,7 @@ def test_mismatches_are_reported_not_hidden(make_engine):
     r = sim.run(eng, s.id)
     assert r["outcome"] == "stopped" and r["expected"] == "stopped" and r["llm"]["used"] is False
     # if the expectation is wrong, the summary says so instead of reporting success
-    fake = sim._summarize(s, "adaptix", {"status": "stopped", "incident": None}, SimpleNamespace(state=None), "recovered", eng)
+    fake = sim._summarize(s, "adaptix", {"status": "stopped", "incident": None}, {}, "recovered", eng)
     assert fake["matches_expectation"] is False and fake["outcome"] == "stopped"
 
 
