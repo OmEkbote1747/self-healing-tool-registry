@@ -232,7 +232,7 @@ class Engine:
         spec = self.storage.tool(tool)
         if spec is None:
             raise EngineError(f"unknown tool {tool}")
-        inc = Incident(tool=tool, simulated=spec.simulated, scenario=scenario,
+        inc = Incident(tool=tool, simulated=spec.simulated, scenario=scenario, healing=heal,
                        correlation_id=correlation_id or uuid.uuid4().hex)
         t0, deadline = time.perf_counter(), time.monotonic() + self.s.total_time_budget_s
         td = self.storage.current(tool)

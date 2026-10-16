@@ -14,7 +14,7 @@ st.logo(str(ROOT / "assets" / "logo.svg"), size="large", link=REPO_URL)
 RENDER = {"overview": overview.render, "tools": tools.render, "drift": drift.render, "recovery": recovery.render,
           "audit": audit.render, "chaos": chaos.render, "health": health.render}
 pages = {
-    "overview": st.Page(overview.render, title="Overview", icon=":material/dashboard:", url_path="overview", default=True),
+    "overview": st.Page(overview.render, title="Overview", icon=":material/dashboard:", default=True),
     "tools": st.Page(tools.render, title="Tool Registry", icon=":material/inventory_2:", url_path="tools"),
     "drift": st.Page(drift.render, title="Schema Drift Explorer", icon=":material/difference:", url_path="drift"),
     "recovery": st.Page(recovery.render, title="Recovery Center", icon=":material/healing:", url_path="recovery"),

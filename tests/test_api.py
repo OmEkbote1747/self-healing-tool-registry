@@ -52,7 +52,10 @@ def test_simulation_creates_real_records_and_metrics(client):
     incs = client.get("/api/incidents?simulated=true").json()
     assert len(incs) == 2 and all(i["simulated"] for i in incs)
     m = client.get("/api/metrics").json()
-    assert m["sample"]["incidents"] == 2 and m["recovered"] == 1
+    # the baseline run (repair disabled) is stored and labelled, but kept out of the metrics
+    assert m["sample"]["incidents"] == 1 and m["sample"]["baseline_incidents_excluded"] == 1 and m["recovered"] == 1
+    assert m["zero_touch_adaptation_rate"] == 100.0
+    assert sorted(i["healing"] for i in incs) == [False, True]
     inc = client.get(f"/api/incidents/{r['runs'][1]['incident']}").json()
     assert [s["stage"] for s in inc["timeline"]][-1] == "outcome"
     tool = r["runs"][1]["incident"] and inc["tool"]

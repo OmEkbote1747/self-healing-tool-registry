@@ -108,6 +108,7 @@ class Incident(BaseModel):
     tool: str
     simulated: bool = False
     scenario: str | None = None
+    healing: bool = True                    # False only for baseline comparison runs (repair disabled)
     started_at: str = Field(default_factory=now_iso)
     finished_at: str | None = None
     category: str = "unknown"

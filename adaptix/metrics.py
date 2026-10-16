@@ -10,7 +10,8 @@ def pct(n, d) -> float | None:
 
 
 def compute(storage, simulated: bool | None = None) -> dict:
-    incs = storage.incidents(simulated=simulated, limit=5000)
+    all_incs = storage.incidents(simulated=simulated, limit=5000)
+    incs = [i for i in all_incs if i.healing]       # baseline comparison runs (repair disabled) are reported apart
     execs = storage.executions(simulated=simulated)
     drift = [i for i in incs if i.category == "schema_drift"]
     recovered = [i for i in incs if i.status == "recovered"]
@@ -25,7 +26,8 @@ def compute(storage, simulated: bool | None = None) -> dict:
     return {
         "scope": "all" if simulated is None else ("simulated" if simulated else "real"),
         "sample": {"incidents": len(incs), "executions": len(execs),
-                   "simulated_incidents": sum(i.simulated for i in incs)},
+                   "simulated_incidents": sum(i.simulated for i in incs),
+                   "baseline_incidents_excluded": len(all_incs) - len(incs)},
         "executions_ok": sum(e["ok"] for e in execs),
         "incidents_by_status": dict(Counter(i.status for i in incs)),
         "incidents_by_category": dict(Counter(i.category for i in incs)),

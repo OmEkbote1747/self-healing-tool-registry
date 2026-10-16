@@ -1,7 +1,7 @@
 import pandas as pd
 import streamlit as st
 
-from views.common import SIM_BADGE, api, badge, empty, fmt_ms, fmt_pct, go, header, kpis, safe_call
+from views.common import BASELINE_BADGE, SIM_BADGE, api, badge, empty, fmt_ms, fmt_pct, go, header, kpis, safe_call
 
 
 def render():
@@ -22,6 +22,9 @@ def render():
 
     sample = m["sample"]
     all_sim = sample["incidents"] and sample["simulated_incidents"] == sample["incidents"]
+    if sample.get("baseline_incidents_excluded"):
+        st.caption(f"{sample['baseline_incidents_excluded']} baseline comparison run(s) with repair disabled are "
+                   "excluded from these metrics.")
     if all_sim:
         st.markdown(f"{SIM_BADGE} &nbsp; All incidents below come from Chaos Lab simulations, not production traffic.",
                     unsafe_allow_html=True)
@@ -53,7 +56,8 @@ def render():
         for i in incs:
             with st.container(border=True):
                 st.markdown(f"{badge(i['status'])} &nbsp; **{i['tool']}** &nbsp; "
-                            + (SIM_BADGE if i["simulated"] else ""), unsafe_allow_html=True)
+                            + (SIM_BADGE if i["simulated"] else "")
+                            + ("" if i.get("healing", True) else " " + BASELINE_BADGE), unsafe_allow_html=True)
                 st.caption(f"{i['category'].replace('_', ' ')} · {fmt_ms(i['duration_ms'])} · {i['started_at'][:19]}Z")
                 if st.button("Open timeline", key=f"ov-{i['id']}", icon=":material/timeline:"):
                     go("recovery", incident_id=i["id"])

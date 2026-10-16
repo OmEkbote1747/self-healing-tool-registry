@@ -1,6 +1,6 @@
 import streamlit as st
 
-from views.common import SIM_BADGE, STAGE_ICON, api, badge, empty, fmt_ms, header, safe_call
+from views.common import BASELINE_BADGE, SIM_BADGE, STAGE_ICON, api, badge, empty, fmt_ms, header, safe_call
 
 DOT = {"ok": "#047857", "warn": "#B45309", "fail": "#B91C1C", "info": "#2563EB"}
 
@@ -43,13 +43,14 @@ def render():
         return
     ids = [i["id"] for i in incs]
     want = st.session_state.get("incident_id")
-    labels = {i["id"]: f"{i['started_at'][:19]} · {i['tool']} · {i['status']} · {i['category']}" for i in incs}
+    labels = {i["id"]: f"{i['started_at'][:19]} · {i['tool']} · {i['status']} · {i['category']}"
+              + ("" if i.get("healing", True) else " · baseline") for i in incs}
     sel = st.selectbox("Incident", ids, index=ids.index(want) if want in ids else 0, format_func=labels.get)
     inc = safe_call(api, "GET", f"/api/incidents/{sel}")
     if not inc:
         return
-    st.markdown(f"### {badge(inc['status'])} &nbsp; `{inc['tool']}` " + (SIM_BADGE if inc["simulated"] else ""),
-                unsafe_allow_html=True)
+    st.markdown(f"### {badge(inc['status'])} &nbsp; `{inc['tool']}` " + (SIM_BADGE if inc["simulated"] else "")
+                + ("" if inc.get("healing", True) else " " + BASELINE_BADGE), unsafe_allow_html=True)
     st.markdown(f"**Reason:** {inc['reason'] or '—'}")
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Category", inc["category"].replace("_", " "))

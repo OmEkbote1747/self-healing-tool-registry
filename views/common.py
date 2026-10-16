@@ -106,6 +106,7 @@ def badge(status: str) -> str:
 
 
 SIM_BADGE = '<span class="ax-badge ax-sim">SIMULATED</span>'
+BASELINE_BADGE = '<span class="ax-badge" style="background:#E2E8F0;color:#334155">BASELINE · repair off</span>'
 
 
 def kpis(items: list[tuple], cols: int = 4):
