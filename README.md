@@ -104,7 +104,8 @@ To point the dashboard at a separately deployed API, set `ADAPTIX_API_URL` and `
 | Page | What it is for |
 |---|---|
 | **Overview** | counts per environment from stored records |
-| **API Registry** | register real HTTPS APIs, check their live schema now or on a schedule, versions and rollback |
+| **API Registry** | register real HTTPS APIs and monitor them: Check now, schedules, live schema status |
+| **Tool Registry** | every registered tool (any environment): endpoint, method, schema source and URL, active version, status, the registered schema snapshot, versions and rollback |
 | **Schema Drift Explorer** | pick ONE tool: registered vs live schema, each difference and what ADAPTIX does about it |
 | **Recovery Center** | every incident as a timeline: failure → schema → drift → proposal → validation → patch → retry → verified or rolled back |
 | **Evidence & Scorecard** | honest pipeline counts (proposed ≠ validated ≠ applied ≠ verified), one incident in detail, audit history, schema change log, exports |
@@ -112,7 +113,7 @@ To point the dashboard at a separately deployed API, set `ADAPTIX_API_URL` and `
 | **Simulation Lab** | the same idea with in-process simulated APIs, plus the baseline-vs-ADAPTIX evaluation |
 | **System Health** | Gemini, credentials and external API status |
 
-All pages read the same records through the API, and a shared environment selector (REAL API / REAL API TEST / SIMULATION) keeps them aligned. There is no automatic fault injection: a demo change happens only when you choose it and confirm.
+Times are shown in Indian Standard Time (records are stored in UTC). All pages read the same records through the API, and a shared environment selector (REAL API / REAL API TEST / SIMULATION) keeps them aligned. There is no automatic fault injection: a demo change happens only when you choose it and confirm.
 
 ## API Registry
 

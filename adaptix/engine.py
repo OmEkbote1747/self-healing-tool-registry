@@ -102,7 +102,7 @@ class Engine:
         if spec.schema_source.kind == "none":
             return Discovery(status="unsupported", error_category="no_schema_source",
                              detail="the provider publishes no machine-readable schema")
-        url = spec.schema_url()
+        url = self.upstreams.rebase(spec.schema_url())       # the address actually contacted in this runtime
         try:
             r = self.upstreams.fetch_json(url)
         except EgressDenied as e:
@@ -118,10 +118,15 @@ class Engine:
             return Discovery(error_category=f"http_{r.status}", detail=f"the schema URL answered HTTP {r.status}", url=url)
         if not isinstance(r.json, dict):
             return Discovery(error_category="not_json", detail="the schema URL did not return a JSON object", url=url)
-        if spec.schema_source.kind == "json_schema":
-            op = parse_json_schema(r.json, spec.path, spec.method)
-        else:
-            op = parse_openapi(r.json, spec.path, spec.method)
+        try:
+            if spec.schema_source.kind == "json_schema":
+                op = parse_json_schema(r.json, spec.path, spec.method)
+            else:
+                op = parse_openapi(r.json, spec.path, spec.method)
+        except Exception as e:                        # malformed document: never treated as "no drift"
+            return Discovery(error_category="invalid_schema", url=url,
+                             detail=f"the document is not a valid {spec.schema_source.kind} schema "
+                                    f"({type(e).__name__})")
         if op is None:
             return Discovery(error_category="operation_not_in_schema", url=url,
                              detail=f"{spec.method} {spec.path} is not in the published schema")

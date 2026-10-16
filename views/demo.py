@@ -3,7 +3,7 @@ import time
 
 import streamlit as st
 
-from views.common import api, badge, fmt_ms, go, header, mutated, safe_call
+from views.common import api, badge, fmt_ms, go, header, ist, mutated, safe_call
 
 TEST_BADGE = ('<span class="ax-badge" style="background:#EEF2FF;color:#3730A3;border-color:#A5B4FC">'
               'REAL API TEST · controlled demo service, not production</span>')
@@ -26,7 +26,7 @@ def _result(job: dict):
     with st.container(border=True):
         st.markdown(f"### {OUTCOME_TEXT.get(status, status)}")
         st.markdown(f"{TEST_BADGE} &nbsp; {badge(status if status != 'blocked' else 'NOT RUN')} &nbsp; "
-                    f"total {fmt_ms(job['elapsed_ms'])}"
+                    f"started {ist(job['started_at'])} · total {fmt_ms(job['elapsed_ms'])}"
                     + (f" · expected **{r['expected']}** ({'as expected' if r.get('as_expected') else 'NOT as expected'})"
                        if r.get("expected") else "")
                     + (f" · LLM: {r['llm']['label']}" if r.get("llm") else ""), unsafe_allow_html=True)

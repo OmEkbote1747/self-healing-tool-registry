@@ -27,6 +27,10 @@ class Upstreams:
         self.mode, self.timeout_s, self.max_schema_bytes = mode, timeout_s, max_schema_bytes
         self.guard = guard if guard is not None else (GuardedHTTP((), timeout_s=timeout_s) if mode != "simulation" else None)
         self._sim_clients: dict[str, object] = {}
+        # REAL_API_TEST only: returns the controlled service's CURRENT base URL in this process (starting it if
+        # needed). Loopback URLs recorded earlier (another port, another process) are re-pointed to it; the guard
+        # still exempts only that exact address. Production never rewrites anything.
+        self.resolve = None
         self._sim_apps: dict[str, object] = {}
         self._lock = threading.Lock()
 
@@ -62,8 +66,21 @@ class Upstreams:
             raise EgressDenied("real_in_simulation", "the Simulation Lab never contacts real providers")
 
     # ---------------------------------------------------------------- requests
+    LOOPBACK = ("127.0.0.1", "localhost", "::1")
+
+    def rebase(self, url: str) -> str:
+        if self.mode != "real_api_test" or self.resolve is None:
+            return url
+        from urllib.parse import urlsplit, urlunsplit
+        p = urlsplit(url)
+        if p.scheme != "http" or (p.hostname or "") not in self.LOOPBACK:
+            return url
+        cur = urlsplit(self.resolve())
+        return urlunsplit((cur.scheme, cur.netloc, p.path, p.query, ""))
+
     def request(self, base_url: str, method: str, url: str, **kw) -> httpx.Response:
         self._check_mode(base_url)
+        base_url = self.rebase(base_url)
         if self.is_simulated(base_url):
             kw.pop("timeout", None)            # in-process test client does not support per-request timeouts
             return self._sim_client(base_url).request(method, url, **kw)
@@ -73,6 +90,7 @@ class Upstreams:
     def fetch_json(self, url: str) -> SimpleNamespace:
         """GET an (absolute) schema URL. Returns status and parsed JSON (None if not JSON)."""
         self._check_mode(url)
+        url = self.rebase(url)
         if self.is_simulated(url):
             path = "/" + url[len("sim://"):].split("/", 1)[1] if "/" in url[len("sim://"):] else "/"
             r = self._sim_client(url).get(path)

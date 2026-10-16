@@ -2,7 +2,7 @@
 import pandas as pd
 import streamlit as st
 
-from views.common import SIM_BADGE, api, fmt_ms, fmt_pct, header, kpis, safe_call
+from views.common import api, fmt_ms, fmt_pct, header, ist, kpis, safe_call, SIM_BADGE
 
 ROWS = [("Accuracy (outcome as expected)", "accuracy", fmt_pct),
         ("Recovery success (repairable cases)", "recovery_success_rate", fmt_pct),
@@ -42,7 +42,7 @@ def evaluation():
         latest = safe_call(api, "GET", "/api/evaluation/latest") or []
         if latest:
             res = latest[0]
-            st.caption(f"Showing the latest stored run ({res['ts'][:19]}Z). Per-case rows are shown after a run in "
+            st.caption(f"Showing the latest stored run ({ist(res['ts'])}). Per-case rows are shown after a run in "
                        "this session.")
     if not res:
         st.info("No evaluation has been run yet.")

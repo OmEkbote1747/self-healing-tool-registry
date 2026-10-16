@@ -4,7 +4,7 @@ import json
 import pandas as pd
 import streamlit as st
 
-from views.common import ENV_PREFIX, api, badge, env_picker, fmt_ms, header, safe_call
+from views.common import api, badge, env_picker, ENV_PREFIX, fmt_ms, header, ist, safe_call
 
 
 def _scorecard(sc: dict):
@@ -47,7 +47,7 @@ def _selected(prefix: str, inc: dict):
     with st.container(border=True):
         st.markdown(f"### {badge(inc['status'])} &nbsp; `{inc['tool']}`", unsafe_allow_html=True)
         st.caption(f"{inc.get('environment') or ''} · {inc['category'].replace('_', ' ')} · started "
-                   f"{inc['started_at'][:19].replace('T', ' ')} UTC · duration {fmt_ms(inc['duration_ms'])} · "
+                   f"{ist(inc['started_at'])} · duration {fmt_ms(inc['duration_ms'])} · "
                    f"retries {inc['retries']} · schema `{inc.get('old_signature') or '—'}` → `{inc.get('new_signature') or '—'}`"
                    + (f" · engine {inc['llm'].get('provider')} ({'real request' if inc['llm'].get('real') else 'not a real request'})"
                       if inc.get("llm") else " · engine: rules"))
@@ -100,7 +100,7 @@ def render():
     else:
         ids = [i["id"] for i in incs]
         want = st.session_state.get("ev_pick")
-        labels = {i["id"]: f"{i['started_at'][:19].replace('T', ' ')} · {i['tool']} · {i['status']} · "
+        labels = {i["id"]: f"{ist(i['started_at'])} · {i['tool']} · {i['status']} · "
                            f"{i['category'].replace('_', ' ')}" + ("" if i.get("healing", True) else " · comparison run")
                   for i in incs}
         pick = st.selectbox("Incident", ids, index=ids.index(want) if want in ids else 0, format_func=labels.get,
@@ -109,7 +109,7 @@ def render():
     with st.expander("Audit history"):
         ev = safe_call(api, "GET", f"{prefix}/audit", params={"limit": 300}) or []
         if ev:
-            st.dataframe(pd.DataFrame([{"time": e["ts"][:19].replace("T", " "), "event": e["kind"], "tool": e["tool"],
+            st.dataframe(pd.DataFrame([{"time": ist(e["ts"]), "event": e["kind"], "tool": e["tool"],
                                         "correlation": (e["correlation_id"] or "")[:12],
                                         "details": json.dumps(e["data"], default=str)[:140]} for e in ev]),
                          hide_index=True, use_container_width=True,

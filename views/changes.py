@@ -5,7 +5,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from views.common import api, go, header, safe_call
+from views.common import api, go, header, ist, safe_call
 
 ENV_TEXT = {"LIVE_API": "REAL API", "REAL_API_TEST": "REAL API TEST", "SIMULATION": "SIMULATION"}
 ENV_PREFIX = {"LIVE_API": "/api", "REAL_API_TEST": "/api/test", "SIMULATION": "/api/sim"}
@@ -132,13 +132,13 @@ def render_table(default_env: list[str] | None = None, key: str = "chg"):
         "Change ID": r["change_id"], "API / Tool": r["tool"], "Environment": ENV_TEXT[r["environment"]],
         "Field path": r["field_path"], "Change type": r["change_type"],
         "Repair status": f"{REPAIR_ICON.get(r['repair_status'], '')} {r['repair_status']}",
-        "Verification": r["verification"], "Timestamp": (r["timestamp"] or "")[:19].replace("T", " ")}
+        "Verification": r["verification"], "Timestamp (IST)": ist(r["timestamp"])}
         for r in res["rows"]])
     sel = st.dataframe(df, hide_index=True, use_container_width=True, on_select="rerun", selection_mode="single-row",
                        key=f"{key}-table", column_config={
                            "Change ID": st.column_config.TextColumn(width="medium"),
                            "Field path": st.column_config.TextColumn(width="medium"),
-                           "Timestamp": st.column_config.TextColumn(width="small")})
+                           "Timestamp (IST)": st.column_config.TextColumn(width="medium")})
     p1, p2, p3 = st.columns([1, 2, 1])
     if p1.button("◀ Previous", disabled=res["page"] <= 1, key=f"{key}-prev"):
         ss["chg_page"] = res["page"] - 1

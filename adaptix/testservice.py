@@ -220,8 +220,25 @@ class TestService:
     def set_orders(self, version: str | None = None, mode: str | None = None) -> dict:
         return self.admin("POST", "/admin/orders", {"version": version, "mode": mode})
 
+    on_install = None            # callback(name, scenario, phase, has_keys): lets ADAPTIX persist what is served
+
     def install(self, name: str, scenario: str, phase: str, keys: dict | None = None) -> dict:
-        return self.admin("POST", f"/admin/m/{name}", {"scenario": scenario, "phase": phase, "keys": keys})
+        out = self.admin("POST", f"/admin/m/{name}", {"scenario": scenario, "phase": phase, "keys": keys})
+        if self.on_install:
+            self.on_install(name, scenario, phase, bool(keys))
+        return out
+
+    def restore(self, apps: dict) -> int:
+        """Re-create scenario APIs after a restart (definitions are deterministic; keyed apps are not restored)."""
+        from .simulation import BY_ID, build_app
+        n = 0
+        for name, spec in apps.items():
+            s = BY_ID.get(spec.get("scenario"))
+            if s is not None and not spec.get("has_keys") and spec.get("phase") in ("v1", "v2"):
+                self._matrix[name] = build_app(s, spec["phase"])
+                self._matrix_specs[name] = {"scenario": s.id, "phase": spec["phase"]}
+                n += 1
+        return n
 
     def stats(self, name: str) -> dict:
         return self.admin("GET", f"/admin/m/{name}")

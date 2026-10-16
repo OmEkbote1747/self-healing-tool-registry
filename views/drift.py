@@ -1,7 +1,7 @@
 """Schema Drift Explorer: one selected tool at a time - registered schema vs the live authoritative schema."""
 import streamlit as st
 
-from views.common import ENV_PREFIX, api, empty, env_picker, header, safe_call
+from views.common import api, empty, env_picker, ENV_PREFIX, header, ist, safe_call, schema_state_chip, schema_unavailable
 
 KIND = {"added": "Added", "removed": "Removed", "renamed": "Renamed", "moved": "Moved", "type_changed": "Type changed",
         "required_changed": "Required ↔ optional", "enum_changed": "Allowed values changed",
@@ -77,19 +77,23 @@ def render():
     if d is None:
         return
     if not d["available"]:
-        if d.get("status") == "unsupported":
-            st.info("This provider publishes no machine-readable schema, so drift cannot be verified and the tool is "
-                    "never repaired automatically.", icon=":material/info:")
-        else:
-            st.warning(f"The live schema could not be read ({d.get('error_category')}). ADAPTIX will not repair this "
-                       "tool until it can (fail closed).", icon=":material/cloud_off:")
+        if d.get("state") == "unsupported":
+            st.markdown(f"{schema_state_chip('unsupported')} &nbsp; **{sel}**", unsafe_allow_html=True)
+            st.caption("This provider publishes no machine-readable schema, so drift cannot be verified and the tool "
+                       "is never repaired automatically.")
+        elif schema_unavailable(d, sel, f"retry-{env}-{sel}"):
+            st.rerun()
+        with st.expander("Registered schema (what the tool was built against, not the live schema)"):
+            _side(f"Registered (tool v{d['current_version']})", d.get("registered"), None)
     else:
         rep = d["report"]
+        st.markdown(f"{schema_state_chip(d['state'])} &nbsp; **{sel}** · read from `{d.get('schema_url')}`",
+                    unsafe_allow_html=True)
         if not rep["changed"]:
-            st.success(f"No schema drift detected for **{sel}**: the live schema matches tool v{d['current_version']}. "
+            st.success(f"No schema drift detected: the live schema matches tool v{d['current_version']}. "
                        "Nothing needs repair.", icon=":material/check_circle:")
         else:
-            st.warning(f"**{sel}**: {rep['summary']} · compatibility **{rep['compatibility']}**", icon=":material/difference:")
+            st.warning(f"{rep['summary']} · compatibility **{rep['compatibility']}**", icon=":material/difference:")
             _changes(rep)
         with st.expander("Registered vs live schema, field by field", expanded=rep["changed"]):
             c1, c2 = st.columns(2, gap="large")
@@ -104,7 +108,7 @@ def render():
     if not incs:
         st.caption("None recorded for this tool.")
         return
-    labels = {i["id"]: f"{i['started_at'][:19].replace('T', ' ')} · {i['status']} · {i['drift']['summary']}" for i in incs}
+    labels = {i["id"]: f"{ist(i['started_at'])} · {i['status']} · {i['drift']['summary']}" for i in incs}
     pick = st.selectbox("Incident", list(labels), format_func=labels.get, key=f"drift_inc_{env}_{sel}")
     i = next(x for x in incs if x["id"] == pick)
     _changes(i["drift"])

@@ -1,6 +1,6 @@
 import streamlit as st
 
-from views.common import BASELINE_BADGE, SIM_BADGE, STAGE_ICON, api, badge, empty, fmt_ms, header, safe_call
+from views.common import api, badge, BASELINE_BADGE, empty, fmt_ms, header, ist, ist_time, safe_call, SIM_BADGE, STAGE_ICON
 
 DOT = {"ok": "#047857", "warn": "#B45309", "fail": "#B91C1C", "info": "#2563EB"}
 
@@ -10,7 +10,7 @@ def timeline(inc: dict):
         icon = STAGE_ICON.get(s["stage"], "radio_button_checked")
         st.markdown(f'<div class="ax-step" style="border-left-color:{DOT[s["status"]]}">'
                     f'<span class="ax-eyebrow" style="color:{DOT[s["status"]]}">{s["stage"]}</span> &nbsp; '
-                    f'<b>{s["title"]}</b> <span style="color:#94A3B8;font-size:.8rem">{s["ts"][11:23]}</span></div>',
+                    f'<b>{s["title"]}</b> <span style="color:#94A3B8;font-size:.8rem">{ist_time(s["ts"], millis=True)}</span></div>',
                     unsafe_allow_html=True)
         if s.get("detail"):
             with st.expander(f":material/{icon}: details", expanded=False):
@@ -74,9 +74,9 @@ def phase_strip(inc: dict):
         c.markdown(f"<div style='border-top:4px solid {color};padding-top:.35rem'><div style='font-size:.78rem;"
                    f"color:#475569;font-weight:650'>{p['phase']}</div><div style='color:{color};font-weight:700'>"
                    f"{p['state'].upper()}</div><div style='font-size:.72rem;color:#94A3B8'>"
-                   f"{(p['ts'] or '')[11:23]}</div></div>", unsafe_allow_html=True)
+                   f"{ist_time(p['ts'], millis=True) if p['ts'] else ''}</div></div>", unsafe_allow_html=True)
     with st.expander("Phase evidence"):
-        st.dataframe([{"phase": p["phase"], "state": p["state"], "time": p["ts"] or "—", "evidence": p["evidence"]}
+        st.dataframe([{"phase": p["phase"], "state": p["state"], "time": ist_time(p["ts"], millis=True) if p["ts"] else "—", "evidence": p["evidence"]}
                       for p in ph], hide_index=True, use_container_width=True)
 
 
@@ -117,7 +117,7 @@ def render(prefix: str | None = None):
         return
     ids = [i["id"] for i in incs]
     want = st.session_state.get("incident_id")
-    labels = {i["id"]: f"{i['started_at'][:19]} · {i['tool']} · {i['status']} · {i['category']}"
+    labels = {i["id"]: f"{ist(i['started_at'])} · {i['tool']} · {i['status']} · {i['category']}"
               + ("" if i.get("healing", True) else " · baseline") for i in incs}
     sel = st.selectbox("Incident", ids, index=ids.index(want) if want in ids else 0, format_func=labels.get)
     inc = safe_call(api, "GET", f"{prefix}/incidents/{sel}")
@@ -164,5 +164,5 @@ def render(prefix: str | None = None):
         events = safe_call(api, "GET", f"{prefix}/audit", params={"correlation_id": inc["correlation_id"], "limit": 50}) or []
         if events:
             st.subheader("Audit events")
-            st.dataframe([{"time": e["ts"][11:19], "event": e["kind"]} for e in events], hide_index=True,
+            st.dataframe([{"time": ist_time(e["ts"]), "event": e["kind"]} for e in events], hide_index=True,
                          use_container_width=True)

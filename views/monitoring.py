@@ -3,7 +3,7 @@ import json
 
 import streamlit as st
 
-from views.common import REAL_BADGE, api, badge, empty, fmt_ms, go, header, mutated, safe_call
+from views.common import api, badge, empty, fmt_ms, go, header, ist, mutated, REAL_BADGE, safe_call
 
 PETSTORE = {"name": "petstore_find_by_status", "provider": "Swagger Petstore (public demo API, swagger.io)",
             "base_url": "https://petstore3.swagger.io/api/v3", "path": "/pet/findByStatus", "method": "GET",
@@ -99,7 +99,7 @@ def _tool_card(t: dict):
             m[1].markdown(f"**Schema**<br>{badge(schema_state if c['schema_status'] == 'verified' else c['schema_status'])}",
                           unsafe_allow_html=True)
             m[2].markdown(f"**Task verification**<br>{badge(c['verification'])}", unsafe_allow_html=True)
-            m[3].markdown(f"**Last checked**<br>{c['ts'][:19].replace('T', ' ')} UTC · {fmt_ms(c.get('duration_ms'))} "
+            m[3].markdown(f"**Last checked**<br>{ist(c['ts'])} · {fmt_ms(c.get('duration_ms'))} "
                           f"· {c['trigger']}", unsafe_allow_html=True)
             if c["schema_status"] == "verified":
                 if c["drift"]:
@@ -118,9 +118,9 @@ def _tool_card(t: dict):
                 st.success(f"Autonomous repair: {c['repair']['reason']}", icon=":material/healing:")
             if c.get("incident") and st.button("Open incident timeline", key=f"inc-{t['tool']}-{c['ts']}"):
                 go("recovery", incident_id=c["incident"], env_choice="REAL API")
-        with st.expander("Versions, rollback and delete"):
-            from views.tools import versions_panel
-            versions_panel("/api", t["tool"], t["current_version"])
+        if st.button("Open in Tool Registry", key=f"tr-{t['tool']}", icon=":material/inventory_2:",
+                     help="Configuration, registered schema, versions and rollback"):
+            go("tools", tool=t["tool"], env_choice="REAL API")
         with st.expander("Check schedule and history"):
             s1, s2, s3 = st.columns([1, 1, 1])
             enabled = s1.toggle("Scheduled checks", t["monitor_enabled"], key=f"en-{t['tool']}")
@@ -130,7 +130,7 @@ def _tool_card(t: dict):
                     st.rerun()
             hist = safe_call(api, "GET", f"/api/monitor/{t['tool']}/checks", params={"limit": 20}) or []
             if hist:
-                st.dataframe([{"time": h["ts"][:19], "trigger": h["trigger"], "connectivity": h["connectivity"],
+                st.dataframe([{"time": ist(h["ts"]), "trigger": h["trigger"], "connectivity": h["connectivity"],
                                "schema": h["schema_status"], "drift": h["drift"], "verification": h["verification"],
                                "error": h.get("error_category") or ""} for h in hist],
                              hide_index=True, use_container_width=True)

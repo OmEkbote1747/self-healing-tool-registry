@@ -6,7 +6,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 ROOT = Path(__file__).resolve().parent.parent
-PAGES = ["overview", "monitoring", "drift", "recovery", "evidence", "demo", "chaos", "health"]
+PAGES = ["overview", "monitoring", "tools", "drift", "recovery", "evidence", "demo", "chaos", "health"]
 
 
 @pytest.fixture(autouse=True)
@@ -47,11 +47,11 @@ def test_page_renders_empty(page):
 def test_navigation_titles():
     src = (ROOT / "app.py").read_text()
     titles = re.findall(r'P\([^)]*?title="([^"]+)"', src)
-    assert titles == ["Overview", "API Registry", "Schema Drift Explorer", "Recovery Center", "Evidence & Scorecard",
-                      "Drift Demo", "Simulation Lab", "System Health"]
+    assert titles == ["Overview", "API Registry", "Tool Registry", "Schema Drift Explorer", "Recovery Center",
+                      "Evidence & Scorecard", "Drift Demo", "Simulation Lab", "System Health"]
     every_view = "\n".join(p.read_text() for p in (ROOT / "views").glob("*.py")) + src
     for gone in ("Real API Monitoring", "Live Project Integration", "Production Audit", "Schema Changes",
-                 "Tool Registry", "All changes", "Baseline (no repair)", "livedb", "run_limit", "max_runs",
+                 "All changes", "Baseline (no repair)", "livedb", "run_limit", "max_runs",
                  "Automatic injection", "STOP NOW"):        # schema-check intervals in API Registry are monitoring, not injection
         assert gone not in every_view, gone
 
@@ -137,3 +137,57 @@ def test_evidence_page_empty_state_and_scorecard_rows():
     stages = list(at.dataframe[0].value["stage"])
     assert stages[:6] == ["Incidents recorded", "Schema drift detected", "Repairs proposed", "Patches validated",
                           "Patches applied", "Verified recoveries"]
+
+
+def test_displayed_times_are_ist():
+    at = _page("demo", timeout=120)
+    at.checkbox(key="demo_confirm").check().run()
+    next(b for b in at.button if b.label == "Introduce change").click().run()
+    assert not at.exception, at.exception
+    text = _text(at)
+    assert " IST" in text and "UTC" not in text and "Z ·" not in text
+    at.session_state["_force_page"] = "evidence"
+    at.session_state["env_choice"] = "REAL API TEST"
+    at.run()
+    inc_box = next(s for s in at.selectbox if s.label == "Incident")
+    assert inc_box.options and all(" IST · " in o for o in inc_box.options), inc_box.options   # labels as shown
+
+
+def test_tool_registry_shares_the_selected_tool_with_the_drift_explorer():
+    at = _page("chaos")
+    at.checkbox(key="sim_confirm").check().run()
+    at.button[0].click().run()
+    at.selectbox[1].set_value(next(o for o in at.selectbox[1].options if "nested object" in o.lower())).run()
+    at.button[0].click().run()
+    at.session_state["_force_page"] = "tools"
+    at.session_state["env_choice"] = "SIMULATION"
+    at.run()
+    assert not at.exception, at.exception
+    box = next(s for s in at.selectbox if s.label == "Tool")
+    chosen = box.options[-1]
+    box.set_value(chosen).run()
+    text = _text(at)
+    assert "Registered schema" in text and "not the live" in text            # snapshot clearly labelled
+    at.session_state["_force_page"] = "drift"
+    at.run()
+    assert not at.exception, at.exception
+    assert next(s for s in at.selectbox if s.label == "Tool").value == chosen  # same tool selected
+    assert chosen in _text(at)
+
+
+def test_unavailable_schema_is_never_shown_as_no_drift():
+    at = _page("chaos")
+    at.checkbox(key="sim_confirm").check().run()
+    at.button[0].click().run()
+    at.session_state["_force_page"] = "drift"
+    at.session_state["env_choice"] = "SIMULATION"
+    at.run()
+    tool = next(s for s in at.selectbox if s.label == "Tool").value
+    # make the simulated API's schema unreadable (the in-process app disappears), then look again
+    from views.common import _client
+    api_app = _client()[0].app.state.adaptix
+    api_app.sim_engine.upstreams._sim_clients.pop(tool)
+    at.run()
+    text = _text(at)
+    assert "Unable to retrieve the authoritative schema" in text and "Automatic repair is paused" in text
+    assert "No schema drift detected" not in text and not at.success
