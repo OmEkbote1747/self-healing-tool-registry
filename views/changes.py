@@ -1,15 +1,15 @@
-"""Schema Changes: one row per detected change across environments, from stored records only."""
+"""Schema change log (shown inside Evidence & Scorecard): one row per detected change, from stored records only."""
 import json
 from datetime import date
 
 import pandas as pd
 import streamlit as st
 
-from views.common import api, go, header, safe_call
+from views.common import api, go, header, ist, safe_call
 
 ENV_TEXT = {"LIVE_API": "REAL API", "REAL_API_TEST": "REAL API TEST", "SIMULATION": "SIMULATION"}
 ENV_PREFIX = {"LIVE_API": "/api", "REAL_API_TEST": "/api/test", "SIMULATION": "/api/sim"}
-RECOVERY_PAGE = {"LIVE_API": "recovery", "REAL_API_TEST": "test_records", "SIMULATION": "sim_records"}
+ENV_CHOICE = {"LIVE_API": "REAL API", "REAL_API_TEST": "REAL API TEST", "SIMULATION": "SIMULATION"}
 REPAIR_ICON = {"Detected": "○", "Analyzed": "◔", "Proposed": "◑", "Validated": "◕", "Applied": "●",
                "Verified": "✔", "Failed": "✖", "Rolled back": "↺", "Requires review": "⚠"}
 FILTER_KEYS = ["chg_q", "chg_env", "chg_type", "chg_status", "chg_ver", "chg_dates", "chg_sort", "chg_order", "chg_page"]
@@ -80,13 +80,12 @@ def _details(r: dict):
             st.caption("No incident timeline (detected by a monitoring check without a failing call).")
     a1, a2, a3 = st.columns(3)
     if r.get("incident_id") and a1.button("View incident", key=f"vi-{r['change_id']}", icon=":material/timeline:"):
-        go(RECOVERY_PAGE[r["environment"]], incident_id=r["incident_id"])
+        go("recovery", incident_id=r["incident_id"], env_choice=ENV_CHOICE[r["environment"]])
     a2.download_button("Export evidence (JSON)", json.dumps(r, indent=2, default=str),
                        f"change-{r['change_id'].replace('#', '-')}.json", "application/json",
                        key=f"dl-{r['change_id']}", icon=":material/download:")
-    if r["environment"] == "LIVE_API" and a3.button("Compare schemas", key=f"cs-{r['change_id']}",
-                                                    icon=":material/difference:"):
-        go("drift", tool=r["tool"])
+    if a3.button("Compare schemas", key=f"cs-{r['change_id']}", icon=":material/difference:"):
+        go("drift", tool=r["tool"], env_choice=ENV_CHOICE[r["environment"]])
 
 
 def render_table(default_env: list[str] | None = None, key: str = "chg"):
@@ -133,13 +132,13 @@ def render_table(default_env: list[str] | None = None, key: str = "chg"):
         "Change ID": r["change_id"], "API / Tool": r["tool"], "Environment": ENV_TEXT[r["environment"]],
         "Field path": r["field_path"], "Change type": r["change_type"],
         "Repair status": f"{REPAIR_ICON.get(r['repair_status'], '')} {r['repair_status']}",
-        "Verification": r["verification"], "Timestamp": (r["timestamp"] or "")[:19].replace("T", " ")}
+        "Verification": r["verification"], "Timestamp (IST)": ist(r["timestamp"])}
         for r in res["rows"]])
     sel = st.dataframe(df, hide_index=True, use_container_width=True, on_select="rerun", selection_mode="single-row",
                        key=f"{key}-table", column_config={
                            "Change ID": st.column_config.TextColumn(width="medium"),
                            "Field path": st.column_config.TextColumn(width="medium"),
-                           "Timestamp": st.column_config.TextColumn(width="small")})
+                           "Timestamp (IST)": st.column_config.TextColumn(width="medium")})
     p1, p2, p3 = st.columns([1, 2, 1])
     if p1.button("◀ Previous", disabled=res["page"] <= 1, key=f"{key}-prev"):
         ss["chg_page"] = res["page"] - 1
@@ -156,9 +155,3 @@ def render_table(default_env: list[str] | None = None, key: str = "chg"):
         st.caption("Select a row to see full before/after values, schema evidence, the repair, validation, retry, "
                    "verification and the incident timeline.")
 
-
-def render():
-    header("Schema Changes", "Every detected change, with its evidence",
-           "Built only from stored records: monitoring checks and incidents. Each row states its environment: REAL "
-           "API (production providers), REAL API TEST (the controlled test service) or SIMULATION.")
-    render_table()

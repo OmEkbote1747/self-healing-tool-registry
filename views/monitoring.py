@@ -1,9 +1,9 @@
-"""Real API Monitoring: register genuine HTTPS APIs, check their live schema, see drift and repairs."""
+"""API Registry: register genuine HTTPS APIs, check their live schema, see drift, repairs and versions."""
 import json
 
 import streamlit as st
 
-from views.common import REAL_BADGE, api, badge, empty, fmt_ms, go, header, safe_call
+from views.common import api, badge, empty, fmt_ms, go, header, ist, mutated, REAL_BADGE, safe_call
 
 PETSTORE = {"name": "petstore_find_by_status", "provider": "Swagger Petstore (public demo API, swagger.io)",
             "base_url": "https://petstore3.swagger.io/api/v3", "path": "/pet/findByStatus", "method": "GET",
@@ -61,6 +61,7 @@ def _register_form(allowed: list[str]):
                     return
                 res = safe_call(api, "POST", "/api/tools", json=body)
                 if res:
+                    mutated()
                     st.session_state.pop("mon_prefill", None)
                     st.success(f"Registered {res['name']} (schema {res['schema_signature']}, source {res['schema_source']})")
                     st.rerun()
@@ -87,6 +88,7 @@ def _tool_card(t: dict):
             with st.spinner("Contacting the provider…"):
                 res = safe_call(api, "POST", f"/api/monitor/{t['tool']}/check")
             if res:
+                mutated()
                 st.rerun()
         if c is None:
             st.info("Not checked yet. Use **Check now**.", icon=":material/schedule:")
@@ -97,7 +99,7 @@ def _tool_card(t: dict):
             m[1].markdown(f"**Schema**<br>{badge(schema_state if c['schema_status'] == 'verified' else c['schema_status'])}",
                           unsafe_allow_html=True)
             m[2].markdown(f"**Task verification**<br>{badge(c['verification'])}", unsafe_allow_html=True)
-            m[3].markdown(f"**Last checked**<br>{c['ts'][:19].replace('T', ' ')} UTC · {fmt_ms(c.get('duration_ms'))} "
+            m[3].markdown(f"**Last checked**<br>{ist(c['ts'])} · {fmt_ms(c.get('duration_ms'))} "
                           f"· {c['trigger']}", unsafe_allow_html=True)
             if c["schema_status"] == "verified":
                 if c["drift"]:
@@ -115,8 +117,11 @@ def _tool_card(t: dict):
             if c.get("repair"):
                 st.success(f"Autonomous repair: {c['repair']['reason']}", icon=":material/healing:")
             if c.get("incident") and st.button("Open incident timeline", key=f"inc-{t['tool']}-{c['ts']}"):
-                go("recovery", incident_id=c["incident"])
-        with st.expander("Schedule and history"):
+                go("recovery", incident_id=c["incident"], env_choice="REAL API")
+        if st.button("Open in Tool Registry", key=f"tr-{t['tool']}", icon=":material/inventory_2:",
+                     help="Configuration, registered schema, versions and rollback"):
+            go("tools", tool=t["tool"], env_choice="REAL API")
+        with st.expander("Check schedule and history"):
             s1, s2, s3 = st.columns([1, 1, 1])
             enabled = s1.toggle("Scheduled checks", t["monitor_enabled"], key=f"en-{t['tool']}")
             minutes = s2.number_input("Every (minutes)", 5, 7 * 24 * 60, t["interval_s"] // 60, step=5, key=f"iv-{t['tool']}")
@@ -125,14 +130,14 @@ def _tool_card(t: dict):
                     st.rerun()
             hist = safe_call(api, "GET", f"/api/monitor/{t['tool']}/checks", params={"limit": 20}) or []
             if hist:
-                st.dataframe([{"time": h["ts"][:19], "trigger": h["trigger"], "connectivity": h["connectivity"],
+                st.dataframe([{"time": ist(h["ts"]), "trigger": h["trigger"], "connectivity": h["connectivity"],
                                "schema": h["schema_status"], "drift": h["drift"], "verification": h["verification"],
                                "error": h.get("error_category") or ""} for h in hist],
                              hide_index=True, use_container_width=True)
 
 
 def render():
-    header("Real API Monitoring", "Live schemas of genuine external APIs",
+    header("API Registry", "Your real APIs and their live schemas",
            "Registered tools call real HTTPS providers through the SSRF guard. ADAPTIX reads each provider's "
            "authoritative schema on a schedule or on demand, compares it with the saved version and, when drift "
            "is confirmed on a real call, repairs, verifies and rolls back autonomously. No simulated data appears here.")

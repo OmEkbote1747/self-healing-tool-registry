@@ -102,7 +102,7 @@ class Engine:
         if spec.schema_source.kind == "none":
             return Discovery(status="unsupported", error_category="no_schema_source",
                              detail="the provider publishes no machine-readable schema")
-        url = spec.schema_url()
+        url = self.upstreams.rebase(spec.schema_url())       # the address actually contacted in this runtime
         try:
             r = self.upstreams.fetch_json(url)
         except EgressDenied as e:
@@ -118,10 +118,15 @@ class Engine:
             return Discovery(error_category=f"http_{r.status}", detail=f"the schema URL answered HTTP {r.status}", url=url)
         if not isinstance(r.json, dict):
             return Discovery(error_category="not_json", detail="the schema URL did not return a JSON object", url=url)
-        if spec.schema_source.kind == "json_schema":
-            op = parse_json_schema(r.json, spec.path, spec.method)
-        else:
-            op = parse_openapi(r.json, spec.path, spec.method)
+        try:
+            if spec.schema_source.kind == "json_schema":
+                op = parse_json_schema(r.json, spec.path, spec.method)
+            else:
+                op = parse_openapi(r.json, spec.path, spec.method)
+        except Exception as e:                        # malformed document: never treated as "no drift"
+            return Discovery(error_category="invalid_schema", url=url,
+                             detail=f"the document is not a valid {spec.schema_source.kind} schema "
+                                    f"({type(e).__name__})")
         if op is None:
             return Discovery(error_category="operation_not_in_schema", url=url,
                              detail=f"{spec.method} {spec.path} is not in the published schema")
@@ -303,12 +308,14 @@ class Engine:
 
     # ================================================================ public entry points
     def execute(self, tool: str, args: dict, correlation_id: str | None = None, scenario: str | None = None,
-                heal: bool = True) -> dict:
+                heal: bool = True, observer=None) -> dict:
+        """observer(step): optional callback receiving each timeline step as it happens (live progress)."""
         spec = self.storage.tool(tool)
         if spec is None:
             raise EngineError(f"unknown tool {tool}")
         inc = Incident(tool=tool, simulated=spec.simulated, scenario=scenario, healing=heal,
                        environment=self.storage.environment, correlation_id=correlation_id or uuid.uuid4().hex)
+        inc._observer = observer
         t0, deadline = time.perf_counter(), time.monotonic() + self.s.total_time_budget_s
         td = self.storage.current(tool)
         inc.from_version = td.version
@@ -400,7 +407,8 @@ class Engine:
 
     # ---------------------------------------------------------------- request repair (E-K)
     def _plan(self, spec, td, args, inc, old, new, report, sent) -> RepairPlan:
-        cached = self.storage.get_mapping(spec.name, td.schema_signature, new.signature())
+        # a run that requires the LLM never reuses a cached repair: the LLM must propose this one
+        cached = None if self.llm_required else self.storage.get_mapping(spec.name, td.schema_signature, new.signature())
         if cached:
             plan = RepairPlan.model_validate({**cached, "source": "reuse"})
             inc.add("plan", "Reusing a previously validated repair for this exact schema change (revalidated below)",

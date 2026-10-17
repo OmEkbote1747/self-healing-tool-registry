@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 Transform = Literal["none", "to_int", "to_float", "to_str", "to_bool", "iso_date"]
 
@@ -141,7 +141,14 @@ class Incident(BaseModel):
     timeline: list[Step] = []
     result: dict | None = None
 
+    _observer: object = PrivateAttr(default=None)     # optional live-progress callback (never persisted)
+
     def add(self, stage: str, title: str, status: str = "info", detail=None) -> Step:
         s = Step(stage=stage, status=status, title=title, detail=detail)
         self.timeline.append(s)
+        if self._observer is not None:
+            try:
+                self._observer(s)
+            except Exception:
+                pass
         return s

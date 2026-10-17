@@ -158,7 +158,21 @@ class GuardedHTTP:
         headers["Host"] = parts.netloc.split("@")[-1]
         ext = {"sni_hostname": t.host} if parts.scheme == "https" else {}
         timeout = kw.pop("timeout", None) or self.timeout_s
-        return self._client.request(method, pinned, headers=headers, extensions=ext, timeout=timeout, **kw)
+        max_bytes = kw.pop("max_bytes", None)
+        if max_bytes is None:
+            return self._client.request(method, pinned, headers=headers, extensions=ext, timeout=timeout, **kw)
+        # size-capped read: stop downloading as soon as the cap is exceeded
+        req = self._client.build_request(method, pinned, headers=headers, extensions=ext, timeout=timeout, **kw)
+        r = self._client.send(req, stream=True)
+        try:
+            body = b""
+            for chunk in r.iter_bytes():
+                body += chunk
+                if len(body) > max_bytes:
+                    raise EgressDenied("response_too_large", f"response larger than {max_bytes} bytes")
+        finally:
+            r.close()
+        return httpx.Response(r.status_code, headers=r.headers, content=body, request=req)
 
     def request(self, method: str, url: str, **kw) -> httpx.Response:
         """One guarded request. Redirects are re-validated hop by hop (GET/HEAD only)."""
@@ -189,11 +203,15 @@ class GuardedHTTP:
             return r
         raise EgressDenied("redirect_denied", "redirect loop")
 
+    JSON_TYPES = ("application/json", "application/openapi+json", "application/vnd.oai.openapi+json", "text/plain")
+
     def get_json(self, url: str, max_bytes: int) -> tuple[int, object]:
-        """GET a JSON document with a size cap. Returns (status, parsed JSON or None)."""
-        r = self.request("GET", url, headers={"Accept": "application/json"})
-        if len(r.content) > max_bytes:
-            raise EgressDenied("response_too_large", f"schema document larger than {max_bytes} bytes")
+        """GET a JSON document with a streamed size cap and a content-type check.
+        Returns (status, parsed JSON) - JSON is None when the body is not a JSON document."""
+        r = self.request("GET", url, headers={"Accept": "application/json"}, max_bytes=max_bytes)
+        ctype = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if ctype and not (ctype in self.JSON_TYPES or ctype.endswith("+json")):
+            return r.status_code, None                       # e.g. an HTML login or error page
         try:
             return r.status_code, r.json()
         except ValueError:

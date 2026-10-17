@@ -9,3 +9,4 @@ pandas==3.0.6
 # API server
 uvicorn==0.54.0
 google-genai==2.31.0
+

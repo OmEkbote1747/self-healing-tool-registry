@@ -82,6 +82,18 @@ class MatrixIn(BaseModel):
     seed: int = Field(default=7, ge=0, le=10_000)
 
 
+class DemoRunIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scenario: Literal["rename", "type", "required", "remove", "prose", "orders"]
+    llm: Literal["none", "gemini"] = "none"
+    confirm: bool = False
+
+
+class ConfirmIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirm: bool = False
+
+
 class MonitorSettingsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool | None = None
@@ -130,8 +142,11 @@ class State:
                                             GuardedHTTP((), timeout_s=settings.request_timeout_s, min_interval_s=0),
                                             settings.max_schema_bytes), sleep=sleep)
         self.test_service = None
-        self.test_lock = threading.Lock()
-        self._svc_lock = threading.Lock()
+        self.test_engine.upstreams.resolve = lambda: self.test_service_started().url
+        self.test_lock = threading.RLock()        # re-entrant: a demo job holds it while the orders flow re-enters
+        from .demo import Jobs
+        self.demo_jobs = Jobs()
+        self._svc_lock = threading.RLock()
         self.monitor = Monitor(self.engine, settings)
         self.started = time.time()
         self.lock = threading.Lock()
@@ -147,12 +162,21 @@ class State:
         from .testservice import TestService
         with self._svc_lock:
             if self.test_service is None or not self.test_service.running():
-                self.test_service = TestService().start()
-                register_secret(self.test_service.admin_token)
+                svc = TestService().start()
+                register_secret(svc.admin_token)
+                apps = json.loads(self.test_storage.get_meta("svc_apps") or "{}")
+                svc.restore(apps)                         # demo APIs served before a restart come back
+                svc.on_install = self._remember_app
                 self.test_engine.upstreams.guard = GuardedHTTP(
                     (), timeout_s=self.settings.request_timeout_s, min_interval_s=0,
-                    exempt=frozenset({self.test_service.address}))
+                    exempt=frozenset({svc.address}))
+                self.test_service = svc
         return self.test_service
+
+    def _remember_app(self, name: str, scenario: str, phase: str, has_keys: bool):
+        apps = json.loads(self.test_storage.get_meta("svc_apps") or "{}")
+        apps[name] = {"scenario": scenario, "phase": phase, "has_keys": has_keys}
+        self.test_storage.set_meta("svc_apps", json.dumps(apps))
 
     def sim_llm(self, choice: str):
         """LLM for a simulation run. 'gemini' is the real provider (labelled real); 'mock' is labelled mock."""
@@ -274,12 +298,31 @@ def create_app(state: State | None = None) -> FastAPI:
                 "response": {k: f.label() for k, f in op.response_fields.items()}, "signature": op.signature(),
                 "source": op.source,
                 "descriptions": {k: f.description for k, f in {**op.fields, **op.response_fields}.items() if f.description}}
-            if d.op is None:
-                return {"available": False, "status": d.status, "error_category": d.error_category,
-                        "detail": d.detail, "registered": side(old), "current_version": td.version}
+            if d.op is None or isinstance(d.op, str):
+                cat = d.error_category or ("method_changed" if isinstance(d.op, str) else "unknown")
+                return {"available": False, "status": d.status, "error_category": cat,
+                        "state": "unsupported" if d.status == "unsupported" else
+                        ("invalid" if cat in ("not_json", "invalid_schema", "operation_not_in_schema") else "unavailable"),
+                        "detail": scrub(d.detail or ""), "schema_url": d.url or None, "registered": side(old),
+                        "current_version": td.version, "repair_enabled": False}
             rep = do_diff(old, d.op)
-            return {"available": True, "registered": side(old), "live": side(d.op), "report": rep.model_dump(),
-                    "current_version": td.version}
+            return {"available": True, "state": "differs" if rep.changed else "no_drift", "registered": side(old),
+                    "live": side(d.op), "report": rep.model_dump(), "current_version": td.version,
+                    "schema_url": d.url, "repair_enabled": True}
+
+        @app.get(prefix + "/tools/{name}/schema", dependencies=[Depends(admin)])
+        def registered_schema(name: str):
+            """The schema the tool's ACTIVE version was built against (stored snapshot; no network request)."""
+            storage.tool(name) or not_found(name)
+            td = storage.current(name)
+            op = storage.get_schema(td.schema_signature)
+            fields = [] if op is None else [
+                {"field": k, "type": f.label(), "required": f.required, "description": f.description}
+                for k, f in {**op.fields, **op.response_fields}.items()] + [
+                {"field": f"header:{h}", "type": "header", "required": True, "description": ""} for h in op.headers]
+            return {"tool": name, "version": td.version, "signature": td.schema_signature,
+                    "source": op.source if op else None, "fields": fields,
+                    "note": "registered snapshot - not the live authoritative schema"}
 
         @app.post(prefix + "/tools/{name}/rollback", dependencies=[Depends(admin)])
         def rollback(name: str):
@@ -335,9 +378,11 @@ def create_app(state: State | None = None) -> FastAPI:
 
         @app.get(f"{prefix}/scorecard", dependencies=[Depends(admin)])
         def scorecard(run_id: str | None = None):
-            return evidence_mod.scorecard(storage.evidence(5000, run_id)) | {"environment": storage.environment}
+            incs = [i.model_dump(mode="json") for i in storage.incidents(limit=5000)]
+            return evidence_mod.scorecard(storage.evidence(5000, run_id)) | {
+                "environment": storage.environment, "pipeline": evidence_mod.incident_scorecard(incs)}
 
-        for fn in (tools, tool, versions, drift, rollback, delete, incidents, incident, audit, get_metrics,
+        for fn in (tools, tool, versions, drift, registered_schema, rollback, delete, incidents, incident, audit, get_metrics,
                    evidence_list, evidence_json, evidence_csv, evidence_one, scorecard):
             fn.__name__ = f"{storage.mode}_{fn.__name__}"
 
@@ -378,6 +423,38 @@ def create_app(state: State | None = None) -> FastAPI:
     def test_reset():
         st.test_storage.reset()
         return {"reset": True, "scope": "REAL_API_TEST database only"}
+
+    # ---------------------------------------------------------------- manual drift demo (REAL_API_TEST)
+    from . import demo as demo_mod
+
+    @app.get("/api/demo/scenarios", dependencies=[Depends(admin)])
+    def demo_scenarios():
+        return {"environment": "REAL_API_TEST", "scenarios": demo_mod.catalog(st),
+                "gemini_configured": is_live(st.llm), "running": bool(st.demo_jobs.running())}
+
+    @app.post("/api/demo/run", dependencies=[Depends(admin)])
+    def demo_run(body: DemoRunIn):
+        """Introduce ONE controlled change after explicit confirmation; recovery then starts automatically."""
+        if not body.confirm:
+            raise HTTPException(422, {"error": "confirmation_required",
+                                      "detail": "introducing a change needs explicit confirmation (confirm=true)"})
+        try:
+            return demo_mod.start(st, body.scenario, body.llm)
+        except demo_mod.DemoError as e:
+            raise HTTPException(409, {"error": "not_started", "detail": str(e)})
+
+    @app.get("/api/demo/jobs/{job_id}", dependencies=[Depends(admin)])
+    def demo_job(job_id: str):
+        j = st.demo_jobs.get(job_id) or not_found(job_id)
+        return demo_mod.public(j)
+
+    @app.post("/api/demo/reset", dependencies=[Depends(admin)])
+    def demo_reset(body: ConfirmIn):
+        if not body.confirm:
+            raise HTTPException(422, {"error": "confirmation_required", "detail": "send confirm=true to reset the demo"})
+        if st.demo_jobs.running():
+            raise HTTPException(409, {"error": "busy", "detail": "a demo run is in progress"})
+        return demo_mod.reset(st)
 
     # ---------------------------------------------------------------- cross-environment views (labelled)
     def worlds(environment: list[str] | None = None) -> dict:
@@ -498,10 +575,13 @@ def create_app(state: State | None = None) -> FastAPI:
         modes = {"adaptix": [True], "baseline": [False], "both": [False, True]}[body.mode]
         with st.lock:                                   # the simulation engine's LLM is chosen per run
             st.sim_engine.set_llm(st.sim_llm(body.llm))
+            # Choosing real Gemini means Gemini proposes the repair (rules only cross-check), not "rules first"
+            st.sim_engine.llm_required = body.llm == "gemini"
             try:
                 runs = [simulation.run(st.sim_engine, body.scenario, body.seed, heal) for heal in modes]
             finally:
                 st.sim_engine.set_llm(NoProvider())
+                st.sim_engine.llm_required = False
         return {"simulated": True, "llm_choice": body.llm, "runs": runs}
 
     @app.post("/api/simulations/reset", dependencies=[Depends(admin)])

@@ -15,6 +15,7 @@ from importlib import metadata
 from urllib.parse import urlsplit
 
 from .netguard import host_allowed
+from .timefmt import ist
 
 
 def _sdk() -> dict:
@@ -36,9 +37,9 @@ def gemini(state) -> dict:
     checks = state.storage.events(kind="llm_check", limit=1)
     last_ok = st.get("last_success_at")
     if last_ok:
-        real = {"status": "VERIFIED", "detail": f"a real Gemini request succeeded at {last_ok[:19]}Z", "at": last_ok}
+        real = {"status": "VERIFIED", "detail": f"a real Gemini request succeeded at {ist(last_ok)}", "at": last_ok}
     elif checks and checks[0]["data"].get("ok"):
-        real = {"status": "VERIFIED", "detail": f"a real Gemini request succeeded at {checks[0]['ts'][:19]}Z "
+        real = {"status": "VERIFIED", "detail": f"a real Gemini request succeeded at {ist(checks[0]['ts'])} "
                                                 "(earlier in this deployment)", "at": checks[0]["ts"]}
     elif checks and checks[0]["data"].get("real"):
         data = checks[0]["data"]

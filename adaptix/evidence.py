@@ -88,9 +88,9 @@ def build(engine, incident: dict | None, *, run_id: str, scenario: str | None, t
         "final": {"outcome": outcome, "verified_recovery": verified, "reason": inc.get("reason")
                   or (result or {}).get("reason")},
         "expected": {"outcome": expected, "category": expected_category,
-                     "matches": None if expected is None else (("recovered" if outcome in
-                                                                ("recovered", "succeeded_without_incident")
-                                                                else outcome) == expected)},
+                     "matches": None if expected is None else (
+                         outcome == expected or (outcome == "succeeded_without_incident" and expected in
+                                                 ("recovered", "succeeded")))},
         "audit": {"correlation_id": inc.get("correlation_id") or (result or {}).get("correlation_id"),
                   "events": len(st.events(correlation_id=inc.get("correlation_id"), limit=500))
                   if inc.get("correlation_id") else 0},
@@ -173,6 +173,29 @@ def scorecard(records: list[dict]) -> dict:
             "environments": sorted({r["environment"] for r in rs}),
         }
     return out
+
+
+def incident_scorecard(incidents: list[dict]) -> dict:
+    """Pipeline counts from stored incidents (one source of truth for every page). Each stage is counted only when
+    the record shows it actually happened: a proposal is not a validated patch, a validated patch is not an applied
+    one, and only an applied patch whose business outcome was verified is a verified recovery."""
+    def stages(i):
+        return {s["stage"] for s in i.get("timeline", [])}
+    real = [i for i in incidents if i.get("healing", True)]
+    proposed = [i for i in real if (i.get("plan") or {}).get("mappings") or (i.get("plan") or {}).get("response_mappings")]
+    validated = [i for i in real if (i.get("validation") or {}).get("accepted")]
+    applied = [i for i in real if "apply" in stages(i) and i.get("to_version")]
+    verified = [i for i in real if i.get("status") == "recovered" and (i.get("verification") or {}).get("ok", True)]
+    times = [i["duration_ms"] for i in verified if i.get("duration_ms") is not None]
+    return {"incidents": len(real),
+            "detected_drift": sum(i.get("category") in ("schema_drift", "mapping_mismatch") for i in real),
+            "proposed_repairs": len(proposed), "validated_patches": len(validated), "applied_patches": len(applied),
+            "verified_recoveries": len(verified),
+            "refused_or_stopped": sum(i.get("status") == "stopped" for i in real),
+            "failures": sum(i.get("status") == "failed" for i in real),
+            "rollbacks": sum(bool(i.get("rolled_back")) for i in real),
+            "baseline_runs_excluded": len(incidents) - len(real),
+            "latency": _latency(times)}
 
 
 CSV_COLUMNS = ["evidence_id", "run_id", "incident_id", "environment", "scenario", "tool", "endpoint",

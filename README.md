@@ -51,18 +51,19 @@ What is never treated as schema drift: 401/403 (credential problems; failover on
 | `adaptix/storage.py` | SQLite (WAL) per world: tools, versions, schema snapshots, incidents, events, executions, mappings, locks, monitoring checks; refuses records from the other world |
 | `adaptix/netguard.py` | SSRF guard for real egress: approved hosts, https, public IPs only, metadata blocked, DNS pinning with verified TLS, redirect re-validation, per-host pacing, Retry-After cooldown |
 | `adaptix/upstreams.py` | production = guarded real providers only; simulation = in-process `sim://` only |
-| `adaptix/monitor.py` | Real API Monitoring: scheduled and on-demand schema checks, GET probes through the full pipeline |
+| `adaptix/monitor.py` | API Registry monitoring: scheduled and on-demand schema checks, GET probes through the full pipeline |
 | `adaptix/testservice.py` | the controlled, versioned test API (real uvicorn HTTP server on 127.0.0.1) for REAL_API_TEST |
+| `adaptix/demo.py` | the manual Drift Demo: introduce one confirmed change on the controlled service, then automatic recovery with live, timed progress |
 | `adaptix/realtest.py` | the 12-step end-to-end recovery demonstration and the real-HTTP scenario matrix |
 | `adaptix/evidence.py` | evidence records per run, scorecard with denominators, CSV export |
-| `adaptix/changes.py` | the Schema Changes table: rows from stored records, server-side filters, sorting and pagination |
+| `adaptix/changes.py` | the schema change log (inside Evidence & Scorecard): rows from stored records, server-side filters, sorting and pagination |
 | `adaptix/integrations.py` | Integration Health statuses (VERIFIED only from recorded real requests) |
 | `adaptix/verify.py` | task verification (status/echo outputs, or the authoritative response schema for read operations) |
 | `adaptix/api.py` | FastAPI backend: production `/api/*`, simulation `/api/sim/*`, monitoring, integrations, OpenAI adapter |
 | `adaptix/simulation.py`, `adaptix/mock_api.py` | Simulation Lab: 21 drift/failure scenarios against isolated simulated APIs |
 | `adaptix/evaluation.py`, `adaptix/cases.py`, `fixtures/` | baseline vs ADAPTIX: 21 scenarios, 125 planned cases, 30 adversarial fixtures |
 | `adaptix/metrics.py` | dashboard metrics computed only from stored records |
-| `app.py`, `views/` | Streamlit dashboard. Production: Overview, Real API Monitoring, Tool Registry, Schema Drift Explorer, Recovery Center, Production Audit. Simulation Lab: Lab, Records, Evaluation, Tools, Drift. System: Integration Health |
+| `app.py`, `views/` | Streamlit dashboard: Overview, API Registry, Schema Drift Explorer, Recovery Center, Evidence & Scorecard; Drift Demo and Simulation Lab (labelled, not production); System Health |
 | `tests/` | pytest suite (see below) |
 
 ## Run it
@@ -91,16 +92,32 @@ To point the dashboard at a separately deployed API, set `ADAPTIX_API_URL` and `
 | `POST /api/repair/execute` | run a tool call through the pipeline |
 | `POST /api/repair/analyze` | diagnose and plan **without sending anything** |
 | `GET /api/incidents[/{id}]`, `GET /api/audit`, `GET /api/metrics` | records, audit log, metrics |
-| `GET /api/monitor`, `POST /api/monitor/{name}/check`, `PUT /api/monitor/{name}`, `GET /api/monitor/{name}/checks` | Real API Monitoring: overview, Check now, schedule, history |
+| `GET /api/monitor`, `POST /api/monitor/{name}/check`, `PUT /api/monitor/{name}`, `GET /api/monitor/{name}/checks` | API Registry: overview, Check now, schedule, history |
 | `GET /api/integrations` | Integration Health report |
 | `GET /api/sim/tools…`, `/api/sim/incidents…`, `/api/sim/audit`, `/api/sim/metrics` | the same read routes for the **simulation** database |
 | `GET/POST /api/simulations`, `POST /api/simulations/reset` | Simulation Lab runs (`llm`: `none` / `mock` / `gemini`) |
 | `POST /api/evaluation`, `GET /api/evaluation/latest` | baseline vs ADAPTIX evaluation (simulation database) |
 | `GET /v1/openai/tools`, `POST /v1/openai/tool_calls` | OpenAI-compatible tool calling (see `examples/openai_agent_loop.py`) |
 
-## Real API Monitoring
+## Using the dashboard
 
-Register a genuine HTTPS API on the **Real API Monitoring** page (or `POST /api/tools`). Each registration needs:
+| Page | What it is for |
+|---|---|
+| **Overview** | counts per environment from stored records |
+| **API Registry** | register real HTTPS APIs and monitor them: Check now, schedules, live schema status |
+| **Tool Registry** | every registered tool (any environment): endpoint, method, schema source and URL, active version, status, the registered schema snapshot, versions and rollback |
+| **Schema Drift Explorer** | pick ONE tool: registered vs live schema, each difference and what ADAPTIX does about it |
+| **Recovery Center** | every incident as a timeline: failure → schema → drift → proposal → validation → patch → retry → verified or rolled back |
+| **Evidence & Scorecard** | honest pipeline counts (proposed ≠ validated ≠ applied ≠ verified), one incident in detail, audit history, schema change log, exports |
+| **Drift Demo** | choose a change, confirm, and watch ADAPTIX detect and repair it automatically on its own controlled test API (REAL API TEST) |
+| **Simulation Lab** | the same idea with in-process simulated APIs, plus the baseline-vs-ADAPTIX evaluation |
+| **System Health** | Gemini, credentials and external API status |
+
+Times are shown in Indian Standard Time (records are stored in UTC). All pages read the same records through the API, and a shared environment selector (REAL API / REAL API TEST / SIMULATION) keeps them aligned. There is no automatic fault injection: a demo change happens only when you choose it and confirm.
+
+## API Registry
+
+Register a genuine HTTPS API on the **API Registry** page (or `POST /api/tools`). Each registration needs:
 
 - the provider and endpoint;
 - the schema source: an OpenAPI or JSON Schema URL, or "none";
@@ -131,7 +148,7 @@ python -m adaptix.testservice --port 8765
 curl http://127.0.0.1:8765/orders-api/health
 ```
 
-**End-to-end demonstration** (Real API Test page, or `POST /api/test/demo`). The schema change: `customer_id` becomes `client_id`.
+**End-to-end demonstration** (Drift Demo page → *Orders API*, or `POST /api/test/demo`). The schema change: `customer_id` becomes `client_id`.
 
 1. **Preflight.** The test service answers over HTTP, and Gemini answers a real minimal request. If either fails, the run stops with an actionable error and nothing falls back.
 2. **Original task on schema v1.** The order is placed. The request, response, schema fingerprint and version are recorded, and the business outcome is confirmed by reading the stored order back (`GET /orders/{id}`).
@@ -245,7 +262,7 @@ Without an LLM key:
 
 With a **real Gemini key** (`gemini-3.5-flash-lite`, run on 2026-10-16):
 
-- **Chaos Lab scenarios:** 9 / 9 recovered, including the LLM-only booking-window rename, and 10 / 10 stopped safely. 0 incorrect patches; 4 Gemini calls, all successful.
+- **Simulation Lab scenarios:** 9 / 9 recovered, including the LLM-only booking-window rename, and 10 / 10 stopped safely. 0 incorrect patches; 4 Gemini calls, all successful.
 - **Adversarial fixtures:** unchanged at 10 / 13 recovered and 17 / 17 safe stops, with 0 incorrect patches. Gemini proposed mappings for the 3 misses, but the independent validator rejected them: the schema contains no text that grounds the rename, so ADAPTIX stops rather than trusting the model.
 
 The repairable cases ADAPTIX did not recover are **safe misses**: it stopped instead of guessing, and no wrong data was sent. Examples: `uid`, `user_identifier`, `room_ref` and `phone → mobile` with no documentation linking the names, and the scenario that needs an LLM. Recovery times are against in-process simulations. They exclude network latency and LLM latency.
@@ -283,12 +300,15 @@ export GEMINI_API_KEY=...            # your own key, server-side only
 
 Then:
 
-1. **Real API Test → Check service and Gemini.** Both should show VERIFIED.
-2. **Run the recovery demo.** Six steps should complete, ending in "verified recovery".
-3. **Run the failure demo.** It should end "rolled back", with the business read-back failing.
-4. **Scenario matrix → Run the matrix,** rules only or real Gemini.
-5. **Evidence & Scorecard → REAL API TEST.** Inspect the records and export the JSON bundle or CSV.
-6. **Schema Changes.** Filter by environment or change type and open a row.
+1. **Drift Demo.** Choose *Rename a field*, tick the confirmation and click **Introduce change**. Watch the steps:
+   baseline check, change introduced, failing call, diagnosis, schema, drift, proposal, validation, patch, retry and
+   verification. It should end "Recovered and verified".
+2. Repeat with *Add a required field*. It should end "Stopped safely", because no value can be invented.
+3. With `GEMINI_API_KEY` set, choose *Orders API* or *Rename documented only in prose*. Real Gemini proposes the repair.
+4. **Schema Drift Explorer → REAL API TEST.** Pick a repaired tool. It shows "No schema drift detected", because the
+   registered schema is now version 2.
+5. **Evidence & Scorecard → REAL API TEST.** Check the counts, open an incident, and export JSON or CSV.
+6. **Drift Demo → Reset** (with confirmation) to return to a known-good state.
 
 ## Limitations
 

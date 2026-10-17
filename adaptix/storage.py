@@ -381,6 +381,15 @@ class Storage:
         with self._conn() as c:
             return [json.loads(r["data"]) for r in c.execute(q, a)]
 
+    def get_meta(self, key: str) -> str | None:
+        with self._conn() as c:
+            r = c.execute("SELECT value FROM meta WHERE key=?", ("x:" + key,)).fetchone()
+        return r["value"] if r else None
+
+    def set_meta(self, key: str, value: str):
+        with self._tx() as c:
+            c.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", ("x:" + key, value))
+
     def update_spec(self, spec: ToolSpec):
         self._guard(spec.simulated, "tool")
         with self._tx() as c:

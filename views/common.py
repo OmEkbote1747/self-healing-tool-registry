@@ -78,9 +78,13 @@ def _client():
 
 @st.cache_resource(show_spinner=False, max_entries=1)
 def _client_for(code_version: str):
+    import os
     import sys
-    for m in [m for m in sys.modules if m == "adaptix" or m.startswith("adaptix.")]:
-        del sys.modules[m]                       # load the current backend code, not a stale copy
+    previous = os.environ.get("ADAPTIX_LOADED_CODE_VERSION")      # survives Streamlit's module reloads
+    if previous and previous != code_version:                    # the backend code changed since the last build
+        for m in [m for m in sys.modules if m == "adaptix" or m.startswith("adaptix.")]:
+            del sys.modules[m]                   # load the current backend code, not a stale copy
+    os.environ["ADAPTIX_LOADED_CODE_VERSION"] = code_version
     from adaptix.config import get_settings
     s = get_settings()
     headers = {"Authorization": f"Bearer {s.admin_token}"}
@@ -164,3 +168,114 @@ def empty(msg: str, action_label: str | None = None, page_key: str | None = None
     st.info(msg, icon=":material/info:")
     if action_label and page_key and st.button(action_label, key=f"empty-{page_key}-{action_label}"):
         go(page_key)
+
+
+# keys holding results derived from server data; cleared after any confirmed mutation so no page shows stale copies
+DERIVED_KEYS = ("chaos_last", "chaos_all", "rt_matrix", "rt_demo", "rt_preflight", "demo_job", "eval", "mon_prefill",
+                "llm_check", "ev_pick")
+
+
+def mutated(*keep: str):
+    """Call after a confirmed change (repair, rollback, reset, registration, demo run). Every page re-reads the API on
+    its next render, so dropping derived copies is enough to keep all views consistent."""
+    for k in DERIVED_KEYS:
+        if k not in keep:
+            st.session_state.pop(k, None)
+    st.cache_data.clear()
+
+
+ENV_PREFIX = {"REAL API": "/api", "REAL API TEST": "/api/test", "SIMULATION": "/api/sim"}
+ENV_NOTE = {"REAL API": "real external providers (production records)",
+            "REAL API TEST": "controlled test service run by ADAPTIX (real HTTP on 127.0.0.1)",
+            "SIMULATION": "in-process simulated APIs (no network)"}
+
+
+def env_picker(key: str, label: str = "Environment") -> str:
+    """One shared environment selector; the choice is remembered across pages (same session key)."""
+    options = list(ENV_PREFIX)
+    cur = st.session_state.get("env_choice", "REAL API")
+    env = st.radio(label, options, index=options.index(cur) if cur in options else 0, horizontal=True, key=key,
+                   help="REAL API: your registered providers · REAL API TEST: the controlled demo service · "
+                        "SIMULATION: in-process simulated APIs")
+    st.session_state["env_choice"] = env
+    if env != "REAL API":
+        st.caption(f"{env}: {ENV_NOTE[env]}. Not production data.")
+    return env
+
+
+# Every displayed time is Indian Standard Time; records stay in UTC (see adaptix/timefmt.py)
+from adaptix.timefmt import IST, ist, ist_time  # noqa: E402,F401
+
+
+# ---------------------------------------------------------------- schema retrieval problems, in plain language
+SCHEMA_PROBLEMS = {
+    "egress_denied:host_not_allowed": ("The schema host is not on the permitted-host list.",
+                                       "If you are authorized to call this API, add its host to ADAPTIX_ALLOWED_HOSTS."),
+    "egress_denied:scheme_not_allowed": ("The schema URL is not HTTPS.",
+                                         "Register an https:// schema URL. Plain HTTP is allowed only for ADAPTIX's own "
+                                         "controlled test service."),
+    "egress_denied:private_address": ("The schema URL points to a private, internal or metadata address, which is blocked.",
+                                      "Use the provider's public HTTPS schema URL."),
+    "egress_denied:dns_failure": ("The schema host name could not be resolved.", "Check the host name in the schema URL."),
+    "dns_failure": ("The schema host name could not be resolved.", "Check the host name in the schema URL."),
+    "egress_denied:redirect_denied": ("The schema URL redirected to a destination that is not permitted.",
+                                      "Register the final schema URL directly."),
+    "egress_denied:response_too_large": ("The schema document is larger than the allowed size.",
+                                         "Raise ADAPTIX_MAX_SCHEMA_BYTES only if the document is genuinely that large."),
+    "egress_denied:rate_limited_local": ("The provider asked ADAPTIX to wait before calling again (Retry-After).",
+                                         "Retry after the wait period."),
+    "egress_denied:invalid_url": ("The registered schema URL is not a valid URL.", "Correct the schema URL."),
+    "tls_error": ("The provider's TLS certificate could not be verified.", "Check the provider's HTTPS certificate."),
+    "timeout": ("The schema request timed out.", "Retry. If it keeps timing out, check that the provider is up."),
+    "network": ("The schema host could not be reached.", "Retry, and check the provider's status."),
+    "http_401": ("The schema URL requires authentication.", "Use a public schema URL, or one this server may read."),
+    "http_403": ("Access to the schema URL is forbidden.", "Use a schema URL this server is allowed to read."),
+    "http_404": ("No schema was found at the registered schema URL.",
+                 "Check the schema URL. For a Drift Demo tool, the demo API may no longer exist: run the demo again or reset it."),
+    "not_json": ("The schema URL did not return a JSON document.", "Point the tool at the provider's OpenAPI JSON."),
+    "invalid_schema": ("The schema document is malformed.", "Check that the URL serves a valid OpenAPI document."),
+    "operation_not_in_schema": ("The tool's endpoint and method are not in the published schema.",
+                                "The endpoint may have moved or been removed. Check the provider's documentation."),
+    "method_changed": ("The published schema no longer accepts this HTTP method.",
+                       "A method change can alter side effects, so ADAPTIX does not repair it automatically."),
+}
+
+
+def schema_problem(category: str | None) -> tuple[str, str]:
+    cat = category or "unknown"
+    if cat in SCHEMA_PROBLEMS:
+        return SCHEMA_PROBLEMS[cat]
+    if cat.startswith("http_5"):
+        return ("The provider returned a server error for the schema URL.", "Retry later.")
+    if cat.startswith("http_"):
+        return (f"The schema URL answered HTTP {cat[5:]}.", "Check the schema URL.")
+    if cat.startswith("egress_denied:"):
+        return ("The request was refused by ADAPTIX's outbound safety policy.", "Check the schema URL and permitted hosts.")
+    return ("The authoritative schema could not be retrieved.", "Check the registered schema URL and permitted hosts.")
+
+
+SCHEMA_STATE = {"no_drift": ("SCHEMA LOADED · NO DRIFT", "VERIFIED"), "differs": ("SCHEMA DIFFERS", "ACTION REQUIRED"),
+                "unavailable": ("SCHEMA UNAVAILABLE", "FAILED"), "invalid": ("INVALID SCHEMA", "FAILED"),
+                "unsupported": ("NO SCHEMA PUBLISHED", "UNSUPPORTED")}
+
+
+def schema_state_chip(state: str) -> str:
+    label, tone = SCHEMA_STATE.get(state, ("UNKNOWN", "NOT RUN"))
+    return badge(tone).replace(tone, label)
+
+
+def schema_unavailable(d: dict, tool: str, retry_key: str) -> bool:
+    """Compact, actionable message for a failed live-schema read. Returns True if the user asked to retry."""
+    what, step = schema_problem(d.get("error_category"))
+    st.markdown(f"{schema_state_chip(d.get('state', 'unavailable'))} &nbsp; **{tool}**", unsafe_allow_html=True)
+    st.markdown(f"Unable to retrieve the authoritative schema. {what} **Automatic repair is paused** until the "
+                f"schema can be verified.<br><span style='color:#475569'>Next step: {step}</span>", unsafe_allow_html=True)
+    retry = st.button("Retry", key=retry_key, icon=":material/refresh:")
+    with st.expander("Technical details"):
+        st.markdown(f"- Error code: `{d.get('error_category') or 'unknown'}`\n"
+                    f"- Schema URL: `{d.get('schema_url') or 'not available'}`\n"
+                    f"- Detail: {d.get('detail') or '—'}")
+        st.caption("Troubleshooting: real APIs must use HTTPS and a host listed in ADAPTIX_ALLOWED_HOSTS. Private, "
+                   "internal and cloud-metadata addresses are always blocked. The controlled test service (REAL API TEST) "
+                   "is reached only at its own current address in this server process. No credentials are shown here.")
+    return retry

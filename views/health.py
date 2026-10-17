@@ -1,7 +1,7 @@
 """Integration Health: Gemini and every external API, with honest statuses."""
 import streamlit as st
 
-from views.common import api, api_mode, badge, header, safe_call
+from views.common import api, api_mode, badge, header, ist, ist_time, safe_call
 
 
 def _row(label: str, item: dict):
@@ -46,7 +46,7 @@ def render():
         res = st.session_state.get("llm_check")
         if res:
             (st.success if res["ok"] else st.error)(
-                f"Last check {res['ts'][11:19]}Z: {'succeeded' if res['ok'] else 'failed'} · "
+                f"Last check {ist_time(res['ts'])}: {'succeeded' if res['ok'] else 'failed'} · "
                 f"{res.get('error_category') or 'ok'} · {res.get('duration_ms')} ms · "
                 f"credential {res.get('credential_alias') or '—'}")
 
@@ -54,7 +54,7 @@ def render():
     st.subheader("External APIs")
     _row("Approved hosts", ext["allowed_hosts"])
     if not ext["apis"]:
-        st.info("No real API is registered. Use Real API Monitoring to add one.", icon=":material/info:")
+        st.info("No real API is registered. Use API Registry to add one.", icon=":material/info:")
     for a in ext["apis"]:
         with st.container(border=True):
             st.markdown(f"**{a['provider']}** · `{a['tool']}` · `{a['endpoint']}`")
@@ -63,7 +63,7 @@ def render():
             _row("Connectivity", a["connectivity"])
             _row("Schema discovery", a["schema_discovery"])
             _row("Used by the repair pipeline", a["pipeline"])
-            st.caption("Last successful check: " + (a["last_successful_check"][:19] + " UTC"
+            st.caption("Last successful check: " + (ist(a["last_successful_check"])
                                                      if a["last_successful_check"] else "none yet"))
 
     st.subheader("Credential registry (production)")
