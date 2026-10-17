@@ -44,7 +44,10 @@ def gemini(state) -> dict:
         real = {"status": "FAILED", "detail": f"last real request failed: {checks[0]['data'].get('error_category')}",
                 "at": checks[0]["ts"]}
     elif st.get("last_error_category"):
-        real = {"status": "FAILED", "detail": f"last real request failed: {st['last_error_category']}"}
+        detail = f"last real request failed: {st['last_error_category']}"
+        if st.get("last_error"):
+            detail += f" ({st['last_error']})"
+        real = {"status": "FAILED", "detail": detail}
     else:
         real = {"status": "NOT RUN", "detail": "no real Gemini request has been made by this server yet"
                 if configured else "not possible until GEMINI_API_KEY is configured"}

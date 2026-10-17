@@ -210,4 +210,7 @@ class GeminiProvider:
         return {"provider": self.name, "model": self.model, "configured": configured, "connectivity": conn,
                 "last_success_at": self.last_success_at,
                 "last_error_category": self.last.get("error_category") if self.last else None,
+                # The adapter stores only scrubbed/truncated provider text, never the API key.
+                # Expose it to the operator so a 400 can be diagnosed from the health page.
+                "last_error": self.last.get("error") if self.last else None,
                 "credentials": [c for c in self.creds.status() if c["group"] == "gemini"]}
