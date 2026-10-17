@@ -183,4 +183,6 @@ class GeminiProvider:
         return {"provider": self.name, "model": self.model, "configured": configured, "connectivity": conn,
                 "last_success_at": self.last_success_at,
                 "last_error_category": self.last.get("error_category") if self.last else None,
+                # Only scrubbed and truncated provider text is retained here; API keys are never exposed.
+                "last_error": self.last.get("error") if self.last else None,
                 "credentials": [c for c in self.creds.status() if c["group"] == "gemini"]}
