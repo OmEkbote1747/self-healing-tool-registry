@@ -41,8 +41,11 @@ def gemini(state) -> dict:
         real = {"status": "VERIFIED", "detail": f"a real Gemini request succeeded at {checks[0]['ts'][:19]}Z "
                                                 "(earlier in this deployment)", "at": checks[0]["ts"]}
     elif checks and checks[0]["data"].get("real"):
-        real = {"status": "FAILED", "detail": f"last real request failed: {checks[0]['data'].get('error_category')}",
-                "at": checks[0]["ts"]}
+        data = checks[0]["data"]
+        detail = f"last real request failed: {data.get('error_category')}"
+        if data.get("error"):
+            detail += f" ({data['error']})"
+        real = {"status": "FAILED", "detail": detail, "at": checks[0]["ts"]}
     elif st.get("last_error_category"):
         detail = f"last real request failed: {st['last_error_category']}"
         if st.get("last_error"):
